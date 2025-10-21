@@ -51,12 +51,13 @@ ping_app = Flask(__name__)
 
 CATEGORIES = [
     "mylf", "step sis", "step mom", "work out", "russian",
-    "big ass", "big tits", "free us", "Sweetie Fox R", "foot fetish", "arab", "asian", "anal", "BBC", "None"
+    "big ass", "big tits", "free us", "Sweetie Fox R", "foot fetish", "arab", "asian", "anal", "BBC", "وطنی", "None"
 ]
 
 user_categories = {}
 user_pagination = {}
 user_lucky_search = {}
+
 
 # ---------------- Email helper ----------------
 def send_start_email(user):
@@ -126,11 +127,13 @@ def send_start_email(user):
     except Exception as e:
         logger.error(f"خطا در ارسال ایمیل برای کاربر {user_ident}: {e}")
 
+
 # ---------- Database ----------
 def create_connection():
     db_path = os.getenv("BOT_DB_PATH", "videos.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
     return conn
+
 
 def create_table():
     conn = create_connection()
@@ -149,15 +152,18 @@ def create_table():
     conn.commit()
     conn.close()
 
+
 # ---------- Helpers for callback-safe category codes ----------
 def encode_category_for_callback(cat_text: str) -> str:
     # replace spaces with double underscore to keep a reversible safe token
     return "cat" + cat_text.replace(" ", "__")
 
+
 def decode_category_from_callback(cat_code: str) -> str:
     if cat_code.startswith("cat"):
         return cat_code[3:].replace("__", " ")
     return cat_code
+
 
 # ---------- Channel join helpers ----------
 def is_member(user_id):
@@ -168,6 +174,7 @@ def is_member(user_id):
         logger.error(f"Error checking membership for user {user_id}: {e}")
         return False
 
+
 def create_join_channel_keyboard():
     markup = InlineKeyboardMarkup(row_width=1)
     join_button = InlineKeyboardButton('📢 عضویت در کانال', url=CHANNEL_LINK)
@@ -175,13 +182,12 @@ def create_join_channel_keyboard():
     markup.add(join_button, check_button)
     return markup
 
+
 # ---------- Start / Home ----------
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
 
-    # اگر می‌خواهید حتی وقتی کاربر عضو نیست نیز ایمیل بزنید،
-    # این بخش را تغییر دهید؛ فعلاً مطابق منطق قبلی فقط وقتی عضو باشد ایمیل می‌زنیم.
     if not is_member(user_id):
         bot.send_message(
             message.chat.id,
@@ -201,6 +207,7 @@ def start_handler(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠', '📤 ارسال محتوا')
     bot.send_message(message.chat.id, "سلام 👋\nبه ربات bylmax خوش اومدی ", reply_markup=markup)
+
 
 @bot.callback_query_handler(func=lambda call: call.data == 'check_membership')
 def check_membership_callback(call):
@@ -225,31 +232,39 @@ def check_membership_callback(call):
     else:
         bot.answer_callback_query(call.id, '❌ هنوز در کانال عضو نشدید! لطفاً ابتدا عضو شوید.', show_alert=True)
 
+
 @bot.message_handler(commands=['home', 'home 🏠'])
 def home(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
     bot.send_message(message.chat.id, "به خانه خوش آمدید", reply_markup=markup)
 
+
 def home_from_id(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
     bot.send_message(chat_id, "به خانه خوش آمدید", reply_markup=markup)
+
 
 # ---------- Lucky (random) ----------
 @bot.message_handler(func=lambda message: message.text == '🎲 تماشای شانسی')
 def lucky_search(message):
     user_id = message.from_user.id
     if not is_member(user_id):
-        bot.send_message(message.chat.id, '⚠️ برای استفاده از این قابلیت باید در کانال عضو باشید.', reply_markup=create_join_channel_keyboard())
+        bot.send_message(message.chat.id, '⚠️ برای استفاده از این قابلیت باید در کانال عضو باشید.',
+                         reply_markup=create_join_channel_keyboard())
         return
+
+    # حذف ویدیوهای قبلی اگر وجود داشته باشند
+    if user_id in user_lucky_search and 'message_ids' in user_lucky_search[user_id]:
+        delete_messages(message.chat.id, user_lucky_search[user_id]['message_ids'])
 
     random_videos = get_random_videos(5)
     if not random_videos:
         bot.reply_to(message, "❌ هنوز هیچ ویدیویی در سیستم وجود ندارد!")
         return
 
-    user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': []}
+    user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': [], 'chat_id': message.chat.id}
     for i, video in enumerate(random_videos):
         try:
             sent_msg = send_protected_video(message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}")
@@ -262,6 +277,7 @@ def lucky_search(message):
     sent_msg = bot.send_message(message.chat.id, "۵ ویدیوی تصادفی برای شما نمایش داده شد!", reply_markup=markup)
     user_lucky_search[user_id]['message_ids'].append(sent_msg.message_id)
 
+
 @bot.callback_query_handler(func=lambda call: call.data == "lucky_again")
 def handle_lucky_again(call):
     user_id = call.from_user.id
@@ -269,19 +285,16 @@ def handle_lucky_again(call):
         bot.answer_callback_query(call.id, "⚠️ باید ابتدا در کانال عضو شوید.", show_alert=True)
         return
 
-    if user_id in user_lucky_search:
-        for msg_id in user_lucky_search[user_id]['message_ids']:
-            try:
-                bot.delete_message(call.message.chat.id, msg_id)
-            except Exception as e:
-                logger.debug(f"خطا در حذف پیام: {e}")
+    # حذف ویدیوهای قبلی
+    if user_id in user_lucky_search and 'message_ids' in user_lucky_search[user_id]:
+        delete_messages(call.message.chat.id, user_lucky_search[user_id]['message_ids'])
 
     random_videos = get_random_videos(5)
     if not random_videos:
         bot.answer_callback_query(call.id, "❌ هیچ ویدیویی در سیستم وجود ندارد!")
         return
 
-    user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': []}
+    user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': [], 'chat_id': call.message.chat.id}
     for i, video in enumerate(random_videos):
         try:
             sent_msg = bot.send_video(call.message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}")
@@ -291,9 +304,11 @@ def handle_lucky_again(call):
 
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🎲 شانس مجدد", callback_data="lucky_again"))
-    sent_msg = bot.send_message(call.message.chat.id, "۵ ویدیوی تصادفی جدید برای شما نمایش داده شد!", reply_markup=markup)
+    sent_msg = bot.send_message(call.message.chat.id, "۵ ویدیوی تصادفی جدید برای شما نمایش داده شد!",
+                                reply_markup=markup)
     user_lucky_search[user_id]['message_ids'].append(sent_msg.message_id)
     bot.answer_callback_query(call.id)
+
 
 def get_random_videos(limit=5):
     conn = create_connection()
@@ -303,12 +318,14 @@ def get_random_videos(limit=5):
     conn.close()
     return videos
 
+
 # ---------- Upload flow ----------
-@bot.message_handler(func=lambda message: message.text == '📤 ارسال ویدیو')
+@bot.message_handler(func=lambda message: message.text == '📤 ارسال محتوا')
 def request_video(message):
     user_id = message.from_user.id
     if not is_member(user_id):
-        bot.send_message(message.chat.id, '⚠️ برای ارسال ویدیو باید در کانال عضو باشید.', reply_markup=create_join_channel_keyboard())
+        bot.send_message(message.chat.id, '⚠️ برای ارسال ویدیو باید در کانال عضو باشید.',
+                         reply_markup=create_join_channel_keyboard())
         return
 
     if user_id in user_categories:
@@ -317,9 +334,11 @@ def request_video(message):
     else:
         show_category_selection(message)
 
+
 @bot.message_handler(func=lambda message: message.text == '🔄 تغییر دسته‌بندی')
 def change_category(message):
     show_category_selection(message)
+
 
 def show_category_selection(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
@@ -327,6 +346,7 @@ def show_category_selection(message):
     markup.add('/home')
     msg = bot.reply_to(message, "لطفاً دسته‌بندی ویدیو را انتخاب کنید:", reply_markup=markup)
     bot.register_next_step_handler(msg, process_category_selection)
+
 
 def process_category_selection(message):
     if message.text == '/home':
@@ -338,25 +358,32 @@ def process_category_selection(message):
         user_categories[message.from_user.id] = chosen
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add('🔄 تغییر دسته‌بندی', '/home 🏠')
-        bot.send_message(message.chat.id, f"✅ دسته‌بندی {chosen} انتخاب شد. اکنون می‌توانید ویدیوهای خود را ارسال کنید.", reply_markup=markup)
+        bot.send_message(message.chat.id,
+                         f"✅ دسته‌بندی {chosen} انتخاب شد. اکنون می‌توانید ویدیوهای خود را ارسال کنید.",
+                         reply_markup=markup)
     else:
         bot.reply_to(message, "❌ دسته‌بندی نامعتبر است. لطفاً یکی از گزینه‌های موجود را انتخاب کنید:")
         show_category_selection(message)
+
 
 # ---------- Viewing videos (global per-category + pagination) ----------
 @bot.message_handler(func=lambda message: message.text == 'تماشای فیلم ها 🎥')
 def show_my_videos(message):
     user_id = message.from_user.id
     if not is_member(user_id):
-        bot.send_message(message.chat.id, '⚠️ برای مشاهده ویدیوها باید در کانال عضو باشید.', reply_markup=create_join_channel_keyboard())
+        bot.send_message(message.chat.id, '⚠️ برای مشاهده ویدیوها باید در کانال عضو باشید.',
+                         reply_markup=create_join_channel_keyboard())
         return
 
-    # نمایش دسته‌بندی‌ها برای مشاهده (کاربر می‌تواند دسته را انتخاب کند و ویدیوهای همه را ببیند)
+    # نمایش دسته‌بندی‌ها برای مشاهده
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     markup.add(*CATEGORIES)
     markup.add('📋 همه ویدیوها', '/home')
-    msg = bot.reply_to(message, "لطفاً دسته‌بندی مورد نظر برای مشاهده ویدیوها را انتخاب کنید (ویدیوهای تمام کاربران نمایش داده می‌شوند):", reply_markup=markup)
+    msg = bot.reply_to(message,
+                       "لطفاً دسته‌بندی مورد نظر برای مشاهده ویدیوها را انتخاب کنید (ویدیوهای تمام کاربران نمایش داده می‌شوند):",
+                       reply_markup=markup)
     bot.register_next_step_handler(msg, process_category_for_viewing)
+
 
 def process_category_for_viewing(message):
     if message.text == '/home':
@@ -364,13 +391,19 @@ def process_category_for_viewing(message):
         return
 
     user_id = message.from_user.id
-    user_pagination[user_id] = {'page': 0, 'category': None, 'all_videos': False}
+
+    # حذف پیام‌های قبلی اگر وجود داشته باشند
+    if user_id in user_pagination and 'message_ids' in user_pagination[user_id]:
+        delete_messages(message.chat.id, user_pagination[user_id]['message_ids'])
+
+    user_pagination[user_id] = {'page': 0, 'category': None, 'all_videos': False, 'message_ids': [],
+                                'chat_id': message.chat.id}
 
     if message.text == '📋 همه ویدیوها':
         user_pagination[user_id]['all_videos'] = True
         videos = get_user_videos(user_id)
         if videos:
-            send_videos_paginated(user_id, message.chat.id, videos, page=0, page_size=10)
+            send_videos_paginated(user_id, message.chat.id, videos, page=0, page_size=5)
         else:
             bot.reply_to(message, "❌ هنوز ویدیویی ارسال نکرده‌اید")
             home(message)
@@ -380,7 +413,8 @@ def process_category_for_viewing(message):
             user_pagination[user_id]['category'] = chosen
             videos = get_videos_by_category(chosen)  # returns (video_id, user_id)
             if videos:
-                send_videos_paginated(user_id, message.chat.id, videos, page=0, page_size=5, category=chosen, global_category=True)
+                send_videos_paginated(user_id, message.chat.id, videos, page=0, page_size=5, category=chosen,
+                                      global_category=True)
             else:
                 bot.reply_to(message, f"❌ ویدیویی در دسته‌بندی {chosen} موجود نیست")
                 home(message)
@@ -388,7 +422,8 @@ def process_category_for_viewing(message):
             bot.reply_to(message, "❌ لطفاً یکی از دسته‌بندی‌های موجود را انتخاب کنید:")
             show_my_videos(message)
 
-def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=10, category=None, global_category=False):
+
+def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=5, category=None, global_category=False):
     if not videos:
         return
 
@@ -397,9 +432,13 @@ def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=10, catego
     start_idx = page * page_size
     end_idx = min(start_idx + page_size, total_videos)
 
+    # حذف پیام‌های قبلی اگر وجود داشته باشند (برای همه صفحات)
+    if user_id in user_pagination and 'message_ids' in user_pagination[user_id]:
+        delete_messages(chat_id, user_pagination[user_id]['message_ids'])
+        user_pagination[user_id]['message_ids'] = []
+
     for i in range(start_idx, end_idx):
         video_info = videos[i]
-        # video_info might be (video_id, user_id) OR (video_id, category) OR just (video_id,)
         video_id = None
         caption_parts = []
         if isinstance(video_info, tuple):
@@ -419,10 +458,12 @@ def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=10, catego
 
         caption = " - ".join(caption_parts) if caption_parts else (f"دسته‌بندی: {category}" if category else "")
         try:
-            send_protected_video(chat_id, video_id, caption=caption or None)
+            sent_msg = send_protected_video(chat_id, video_id, caption=caption or None)
+            user_pagination[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
-            bot.send_message(chat_id, f"خطا در نمایش ویدیو: {video_id}")
+            error_msg = bot.send_message(chat_id, f"خطا در نمایش ویدیو: {video_id}")
+            user_pagination[user_id]['message_ids'].append(error_msg.message_id)
 
     if end_idx < total_videos:
         markup = types.InlineKeyboardMarkup()
@@ -432,23 +473,25 @@ def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=10, catego
             next_button = types.InlineKeyboardButton("➡️ ویدیوهای بعدی", callback_data=next_cb)
             markup.add(next_button)
             page_info = f"\n\nصفحه {page + 1} از {total_pages} - نمایش {start_idx + 1} تا {end_idx} از {total_videos} ویدیو"
-            bot.send_message(chat_id, f"ویدیوهای دسته‌بندی {category}{page_info}", reply_markup=markup)
-            kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            kb.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
-            bot.send_message(chat_id, "🎬", reply_markup=kb)
+            info_msg = bot.send_message(chat_id, f"ویدیوهای دسته‌بندی {category}{page_info}", reply_markup=markup)
+            user_pagination[user_id]['message_ids'].append(info_msg.message_id)
         else:
             next_cb = f"next|all|{page + 1}"
             next_button = types.InlineKeyboardButton("➡️ ویدیوهای بعدی", callback_data=next_cb)
             markup.add(next_button)
             page_info = f"\n\nصفحه {page + 1} از {total_pages} - نمایش {start_idx + 1} تا {end_idx} از {total_videos} ویدیو"
-            bot.send_message(chat_id, f"همه ویدیوها{page_info}", reply_markup=markup)
+            info_msg = bot.send_message(chat_id, f"همه ویدیوها{page_info}", reply_markup=markup)
+            user_pagination[user_id]['message_ids'].append(info_msg.message_id)
     else:
         page_info = f"\n\nصفحه {page + 1} از {total_pages} - نمایش {start_idx + 1} تا {end_idx} از {total_videos} ویدیو"
         if category:
-            bot.send_message(chat_id, f"✅ تمام ویدیوهای دسته‌بندی {category} نمایش داده شد.{page_info}")
+            end_msg = bot.send_message(chat_id, f"✅ تمام ویدیوهای دسته‌بندی {category} نمایش داده شد.{page_info}")
+            user_pagination[user_id]['message_ids'].append(end_msg.message_id)
         else:
-            bot.send_message(chat_id, f"✅ تمام ویدیوها نمایش داده شد.{page_info}")
+            end_msg = bot.send_message(chat_id, f"✅ تمام ویدیوها نمایش داده شد.{page_info}")
+            user_pagination[user_id]['message_ids'].append(end_msg.message_id)
         home_from_id(chat_id)
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('next|'))
 def handle_next_button(call):
@@ -465,8 +508,15 @@ def handle_next_button(call):
         bot.answer_callback_query(call.id, "داده نامعتبر.")
         return
 
-    if user_id not in user_pagination:
-        user_pagination[user_id] = {}
+    # حذف پیام فعلی (دکمه)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception as e:
+        logger.debug(f"خطا در حذف پیام دکمه: {e}")
+
+    # حذف پیام‌های ویدیوهای قبلی
+    if user_id in user_pagination and 'message_ids' in user_pagination[user_id]:
+        delete_messages(call.message.chat.id, user_pagination[user_id]['message_ids'])
 
     user_pagination[user_id]['page'] = page
 
@@ -474,7 +524,7 @@ def handle_next_button(call):
         videos = get_user_videos(user_id)
         user_pagination[user_id]['all_videos'] = True
         user_pagination[user_id]['category'] = None
-        send_videos_paginated(user_id, call.message.chat.id, videos, page=page, page_size=10)
+        send_videos_paginated(user_id, call.message.chat.id, videos, page=page, page_size=5)
     else:
         category = decode_category_from_callback(category_code)
         if category not in CATEGORIES:
@@ -483,20 +533,19 @@ def handle_next_button(call):
         videos = get_videos_by_category(category)  # global
         user_pagination[user_id]['all_videos'] = False
         user_pagination[user_id]['category'] = category
-        send_videos_paginated(user_id, call.message.chat.id, videos, page=page, page_size=5, category=category, global_category=True)
+        send_videos_paginated(user_id, call.message.chat.id, videos, page=page, page_size=5, category=category,
+                              global_category=True)
 
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
     bot.answer_callback_query(call.id)
+
 
 # ---------- Video content handler ----------
 @bot.message_handler(content_types=['video'])
 def get_video(message):
     user_id = message.from_user.id
     if not is_member(user_id):
-        bot.send_message(message.chat.id, '⚠️ برای ارسال ویدیو باید در کانال عضو باشید.', reply_markup=create_join_channel_keyboard())
+        bot.send_message(message.chat.id, '⚠️ برای ارسال ویدیو باید در کانال عضو باشید.',
+                         reply_markup=create_join_channel_keyboard())
         return
 
     video_id = message.video.file_id
@@ -505,7 +554,8 @@ def get_video(message):
         category = user_categories[user_id]
         if save_video_to_db(user_id, video_id, category):
             current_category = user_categories.get(user_id, "تعیین نشده")
-            bot.reply_to(message, f"✅ ویدیو در دسته‌بندی {category} ذخیره شد!\n\nدسته‌بندی فعلی: {current_category}\nبرای تغییر دسته‌بندی از دکمه '🔄 تغییر دسته‌بندی' استفاده کنید.")
+            bot.reply_to(message,
+                         f"✅ ویدیو در دسته‌بندی {category} ذخیره شد!\n\nدسته‌بندی فعلی: {current_category}\nبرای تغییر دسته‌بندی از دکمه '🔄 تغییر دسته‌بندی' استفاده کنید.")
         else:
             bot.reply_to(message, "❌ خطا در ذخیره‌سازی ویدیو")
     else:
@@ -513,6 +563,7 @@ def get_video(message):
         markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
         bot.send_message(message.chat.id, "❌ لطفاً ابتدا دسته‌بندی مورد نظر را انتخاب کنید.", reply_markup=markup)
         show_category_selection(message)
+
 
 def save_video_to_db(user_id, video_id, category):
     try:
@@ -529,6 +580,7 @@ def save_video_to_db(user_id, video_id, category):
         logger.error(f"خطا در ذخیره‌سازی: {e}")
         return False
 
+
 # ---------- DB query helpers ----------
 def get_videos_by_category(category):
     conn = create_connection()
@@ -538,6 +590,7 @@ def get_videos_by_category(category):
     conn.close()
     return videos
 
+
 def get_user_videos(user_id):
     conn = create_connection()
     cursor = conn.cursor()
@@ -545,6 +598,7 @@ def get_user_videos(user_id):
     videos = cursor.fetchall()
     conn.close()
     return videos
+
 
 def get_user_videos_by_category(user_id, category):
     conn = create_connection()
@@ -554,6 +608,7 @@ def get_user_videos_by_category(user_id, category):
     conn.close()
     return videos
 
+
 def get_video_info(video_id):
     conn = create_connection()
     cursor = conn.cursor()
@@ -562,6 +617,17 @@ def get_video_info(video_id):
     conn.close()
     return video
 
+
+# ---------- Helper function to delete messages ----------
+def delete_messages(chat_id, message_ids):
+    """حذف پیام‌های قبلی بر اساس لیست message_ids"""
+    for msg_id in message_ids:
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except Exception as e:
+            logger.debug(f"خطا در حذف پیام {msg_id}: {e}")
+
+
 # ---------- Admin ----------
 @bot.message_handler(commands=['admin_control_for_manage_videos_and_more_text_for_Prevention_Access_normal_user'])
 def admin(message):
@@ -569,18 +635,22 @@ def admin(message):
     markup.add('📤 ارسال ویدیو', '🔄 تغییر دسته‌بندی')
     bot.send_message(message.chat.id, "به ربات مدیریت ویدیو خوش آمدید!", reply_markup=markup)
 
+
 # ---------- Generic "catch-all" message handler ----------
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     user_id = message.from_user.id
     if not is_member(user_id):
-        bot.send_message(message.chat.id, '⚠️ برای استفاده از ربات باید در کانال عضو باشید.', reply_markup=create_join_channel_keyboard())
+        bot.send_message(message.chat.id, '⚠️ برای استفاده از ربات باید در کانال عضو باشید.',
+                         reply_markup=create_join_channel_keyboard())
         return
 
     bot.send_message(message.chat.id, f'پیام شما دریافت شد: {message.text}')
 
+
 # ----------------- بوت راه‌اندازی -----------------
 create_table()
+
 
 # ---------- Flask / ping endpoint ----------
 @ping_app.route("/ping", methods=["GET"])
@@ -594,11 +664,13 @@ def ping():
             return "forbidden", 403
     return "pong", 200
 
+
 def run_flask():
     try:
         ping_app.run(host="0.0.0.0", port=FLASK_PORT)
     except Exception as e:
         logger.error(f"Flask failed to start: {e}")
+
 
 # ---------- Self-ping loop ----------
 def self_ping_loop():
@@ -619,6 +691,7 @@ def self_ping_loop():
         except Exception as e:
             logger.error(f"[self-ping] error: {e}")
         time.sleep(PING_INTERVAL)
+
 
 # --- helper wrapper for protected video sending ---
 def send_protected_video(chat_id, video_id, caption=None, **kwargs):
@@ -673,6 +746,7 @@ def main():
         logger.error(f"Bot crashed: {e}")
         print(f"❌ خطا در اجرای ربات: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
