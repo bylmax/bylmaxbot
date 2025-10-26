@@ -3,7 +3,6 @@ import ssl
 from email.message import EmailMessage
 from datetime import datetime, timezone
 import os
-import sqlite3
 import logging
 import sys
 import time
@@ -15,6 +14,12 @@ from flask import Flask, request
 import telebot
 from telebot import types
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# اضافه: psycopg2
+import psycopg2
+from psycopg2 import sql
+from psycopg2 import extras
+from psycopg2.pool import ThreadedConnectionPool
 
 # ---------------- Config / Logging ----------------
 logging.basicConfig(
@@ -58,6 +63,74 @@ user_categories = {}
 user_pagination = {}
 user_lucky_search = {}
 
+# ---------------- Postgres (Threaded pool) ----------------
+_db_pool = None
+
+def init_db_pool():
+    global _db_pool
+    if _db_pool:
+        return
+
+    # Prefer DATABASE_URL if provided (common on Liara)
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        # psycopg2 can accept a URL directly
+        try:
+            _db_pool = ThreadedConnectionPool(1, 10, dsn=database_url)
+            logger.info("Postgres pool created from DATABASE_URL")
+            return
+        except Exception as e:
+            logger.error(f"Couldn't create pool from DATABASE_URL: {e}")
+            raise
+
+    # Otherwise build from individual env vars
+    pg_host = os.getenv("PG_HOST")
+    pg_port = os.getenv("PG_PORT", "5432")
+    pg_db = os.getenv("PG_DB")
+    pg_user = os.getenv("PG_USER")
+    pg_pass = os.getenv("PG_PASS")
+    pg_sslmode = os.getenv("PG_SSLMODE", None)  # e.g. "require" or None
+
+    if not (pg_host and pg_db and pg_user and pg_pass):
+        raise RuntimeError("Postgres connection info not fully provided (set DATABASE_URL or PG_HOST/PG_DB/PG_USER/PG_PASS)")
+
+    conn_str_parts = [
+        f"host={pg_host}",
+        f"port={pg_port}",
+        f"dbname={pg_db}",
+        f"user={pg_user}",
+        f"password={pg_pass}"
+    ]
+    if pg_sslmode:
+        conn_str_parts.append(f"sslmode={pg_sslmode}")
+    conn_str = " ".join(conn_str_parts)
+
+    try:
+        _db_pool = ThreadedConnectionPool(1, 10, dsn=conn_str)
+        logger.info("Postgres pool created from PG_* env vars")
+    except Exception as e:
+        logger.error(f"Couldn't create Postgres pool: {e}")
+        raise
+
+def get_conn():
+    global _db_pool
+    if _db_pool is None:
+        init_db_pool()
+    conn = _db_pool.getconn()
+    # use autocommit=False and we will commit manually where needed
+    return conn
+
+def put_conn(conn, close=False):
+    global _db_pool
+    if _db_pool is None:
+        return
+    try:
+        if close:
+            conn.close()
+        else:
+            _db_pool.putconn(conn)
+    except Exception as e:
+        logger.debug(f"Error returning connection to pool: {e}")
 
 # ---------------- Email helper ----------------
 def send_start_email(user):
@@ -128,29 +201,45 @@ def send_start_email(user):
         logger.error(f"خطا در ارسال ایمیل برای کاربر {user_ident}: {e}")
 
 
-# ---------- Database ----------
-def create_connection():
-    db_path = os.getenv("BOT_DB_PATH", "videos.db")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    return conn
-
-
+# ---------- Database (Postgres) ----------
 def create_table():
-    conn = create_connection()
-    cursor = conn.cursor()
-    # create safe category list for CHECK
-    cat_list_sql = ",".join([f"'{c}'" for c in CATEGORIES])
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS videos
-        (
-            video_id TEXT PRIMARY KEY,
-            user_id INTEGER,
-            category TEXT CHECK(category IN ({cat_list_sql})),
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    """
+    ایجاد جدول videos در Postgres با همان ساختار.
+    از ThreadedConnectionPool استفاده می‌کنیم تا در تردها امن باشد.
+    """
+    init_db_pool()
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # create safe category list for CHECK
+        # توجه: در SQL از علامت ' استفاده می‌کنیم، امن شد با sql.Literal در psycopg2.sql
+        # اما برای سادگی و چون CATEGORIES تحت کنترل ماست، از joining امن استفاده می‌کنیم.
+        cat_list_sql = ",".join([f"'{c}'" for c in CATEGORIES])
+        create_sql = f'''
+            CREATE TABLE IF NOT EXISTS videos
+            (
+                video_id TEXT PRIMARY KEY,
+                user_id BIGINT,
+                category TEXT CHECK (category IN ({cat_list_sql})),
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        '''
+        cur.execute(create_sql)
+        conn.commit()
+        cur.close()
+        logger.info("Postgres table 'videos' ensured.")
+    except Exception as e:
+        logger.error(f"Error creating table: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 # ---------- Helpers for callback-safe category codes ----------
@@ -311,12 +400,20 @@ def handle_lucky_again(call):
 
 
 def get_random_videos(limit=5):
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT video_id FROM videos ORDER BY RANDOM() LIMIT ?', (limit,))
-    videos = cursor.fetchall()
-    conn.close()
-    return videos
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT video_id FROM videos ORDER BY RANDOM() LIMIT %s', (limit,))
+        videos = cur.fetchall()
+        cur.close()
+        return videos
+    except Exception as e:
+        logger.error(f"Error fetching random videos: {e}")
+        return []
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 # ---------- Upload flow ----------
@@ -359,7 +456,7 @@ def process_category_selection(message):
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add('🔄 تغییر دسته‌بندی', '/home 🏠')
         bot.send_message(message.chat.id,
-                         f"✅ دسته‌بندی {chosen} انتخاب شد. اکنون می‌توانید ویدیوهای خود را ارسال کنید.",
+                         f"✅ دسته‌بندی {chosen} انتخاب شد. اکنون می‌توانید ویدیوی خود را ارسال کنید.",
                          reply_markup=markup)
     else:
         bot.reply_to(message, "❌ دسته‌بندی نامعتبر است. لطفاً یکی از گزینه‌های موجود را انتخاب کنید:")
@@ -566,56 +663,101 @@ def get_video(message):
 
 
 def save_video_to_db(user_id, video_id, category):
+    conn = None
     try:
-        conn = create_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO videos (video_id, user_id, category)
-            VALUES (?, ?, ?)
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO videos (video_id, user_id, category)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (video_id) DO UPDATE
+              SET user_id = EXCLUDED.user_id,
+                  category = EXCLUDED.category,
+                  timestamp = CURRENT_TIMESTAMP
         ''', (video_id, user_id, category))
         conn.commit()
-        conn.close()
+        cur.close()
         return True
     except Exception as e:
         logger.error(f"خطا در ذخیره‌سازی: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         return False
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 # ---------- DB query helpers ----------
 def get_videos_by_category(category):
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT video_id, user_id FROM videos WHERE category = ?', (category,))
-    videos = cursor.fetchall()
-    conn.close()
-    return videos
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT video_id, user_id FROM videos WHERE category = %s ORDER BY timestamp DESC', (category,))
+        videos = cur.fetchall()
+        cur.close()
+        return videos
+    except Exception as e:
+        logger.error(f"Error in get_videos_by_category: {e}")
+        return []
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 def get_user_videos(user_id):
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT video_id, category FROM videos WHERE user_id = ?', (user_id,))
-    videos = cursor.fetchall()
-    conn.close()
-    return videos
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT video_id, category FROM videos WHERE user_id = %s ORDER BY timestamp DESC', (user_id,))
+        videos = cur.fetchall()
+        cur.close()
+        return videos
+    except Exception as e:
+        logger.error(f"Error in get_user_videos: {e}")
+        return []
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 def get_user_videos_by_category(user_id, category):
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT video_id, category FROM videos WHERE user_id = ? AND category = ?', (user_id, category))
-    videos = cursor.fetchall()
-    conn.close()
-    return videos
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT video_id, category FROM videos WHERE user_id = %s AND category = %s ORDER BY timestamp DESC', (user_id, category))
+        videos = cur.fetchall()
+        cur.close()
+        return videos
+    except Exception as e:
+        logger.error(f"Error in get_user_videos_by_category: {e}")
+        return []
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 def get_video_info(video_id):
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id, category FROM videos WHERE video_id = ?', (video_id,))
-    video = cursor.fetchone()
-    conn.close()
-    return video
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT user_id, category FROM videos WHERE video_id = %s', (video_id,))
+        video = cur.fetchone()
+        cur.close()
+        return video
+    except Exception as e:
+        logger.error(f"Error in get_video_info: {e}")
+        return None
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 # ---------- Helper function to delete messages ----------
