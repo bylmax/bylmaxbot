@@ -14,13 +14,17 @@ from flask import Flask, request
 import telebot
 from telebot import types
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-
+from dotenv import load_dotenv
+from pathlib import Path
 # اضافه: psycopg2
 import psycopg2
 from psycopg2 import sql
 from psycopg2 import extras
 from psycopg2.pool import ThreadedConnectionPool
 
+
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 # ---------------- Config / Logging ----------------
 logging.basicConfig(
     level=logging.INFO,
