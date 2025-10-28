@@ -298,7 +298,7 @@ def start_handler(message):
         logger.warning(f"Couldn't start email thread: {e}")
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠', '📤 ارسال محتوا')
+    markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
     bot.send_message(message.chat.id, "سلام 👋\nبه ربات bylmax خوش اومدی ", reply_markup=markup)
 
 
