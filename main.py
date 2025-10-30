@@ -194,13 +194,13 @@ def update_user_activity(user_id):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute('''
-                    INSERT INTO user_activity (user_id, last_activity, reminder_sent)
-                    VALUES (%s, CURRENT_TIMESTAMP, FALSE) ON CONFLICT (user_id) 
-            DO
-                    UPDATE SET
-                        last_activity = CURRENT_TIMESTAMP,
-                        reminder_sent = FALSE
-                    ''', (user_id,))
+            INSERT INTO user_activity (user_id, last_activity, reminder_sent)
+            VALUES (%s, CURRENT_TIMESTAMP, FALSE)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET 
+                last_activity = CURRENT_TIMESTAMP,
+                reminder_sent = FALSE
+        ''', (user_id,))
         conn.commit()
         cur.close()
         return True
@@ -219,42 +219,41 @@ def update_user_activity(user_id):
 
 def send_reminder_to_inactive_users():
     """
-    ارسال پیام یادآوری به کاربرانی که 24 ساعت از آخرین فعالیتشان گذشته
+    ارسال پیام یادآوری به کاربرانی که 1 دقیقه از آخرین فعالیتشان گذشته (برای تست)
     """
     conn = None
     try:
         conn = get_conn()
         cur = conn.cursor()
 
-        # پیدا کردن کاربرانی که 24 ساعت از آخرین فعالیتشان گذشته و هنوز یادآوری ارسال نشده
+        # برای تست: 1 دقیقه به جای 24 ساعت
         cur.execute('''
                     SELECT user_id
                     FROM user_activity
-                    WHERE last_activity < NOW() - INTERVAL '24 hours'
+                    WHERE last_activity < NOW() - INTERVAL '1 minute'
                       AND reminder_sent = FALSE
                     ''')
         inactive_users = cur.fetchall()
 
+        reminder_count = 0
         for (user_id,) in inactive_users:
             try:
-                mess = random.choice(["خبر فوری!\n چند وقته با هم تنها نبودیم💖",
-                                      "کشف تازه دانشمندان \n ربات bylmax باعث آرامش روح می شود",
-                                      "دکتر حسابی می گوید: \n  ربات bylmax باعث جلو گیری از سکته مغزی می شود می شود",
-                                      "سلام شنیدم بیکاری \n بیا به ربات و ...",
-                                      "همه چی برای تو \n گروه bulmax تمام تلاششونو دارن برات می کنن نمی خوای ببینی",
-                                      "لقب جدید bylmax \n یاور همیشه مومن لقب جدید bylmax چون همیشه دوست داره",
-                                      "کاملا رایگان \n bylmax به صورت کاملا رایگان در اختیار شماست شماست",
-                                      "صاحب واقعی bylmax کیست ؟ \n معلومه دیگه خودتی🌹",
-                                      "خودتو امتحان کن! \n به نظرت کارت تو bylmax چند دقیقه طول می کشه",
-                                      "برنج نیستی اما \n خوب بلدم خیست کنم🌊"
-                                      ])
-                # ارسال پیام یادآوری
-                bot.send_message(
-                    user_id,
-                     mess
-                )
+                mess = random.choice([
+                    "خبر فوری!\n چند وقته با هم تنها نبودیم💖",
+                    "کشف تازه دانشمندان \n ربات bylmax باعث آرامش روح می شود",
+                    "دکتر حسابی می گوید: \n ربات bylmax باعث جلو گیری از سکته مغزی می شود",
+                    "سلام شنیدم بیکاری \n بیا به ربات و ...",
+                    "همه چی برای تو \n گروه bulmax تمام تلاششونو دارن برات می کنن نمی خوای ببینی",
+                    "لقب جدید bylmax \n یاور همیشه مومن لقب جدید bylmax چون همیشه دوست داره",
+                    "کاملا رایگان \n bylmax به صورت کاملا رایگان در اختیار شماست",
+                    "صاحب واقعی bylmax کیست ؟ \n معلومه دیگه خودتی🌹",
+                    "خودتو امتحان کن! \n به نظرت کارت تو bylmax چند دقیقه طول می کشه",
+                    "برنج نیستی اما \n خوب بلدم خیست کنم🌊"
+                ])
 
-                # علامت‌گذاری که یادآوری ارسال شده
+                bot.send_message(user_id, mess)
+                reminder_count += 1
+
                 cur.execute(
                     'UPDATE user_activity SET reminder_sent = TRUE WHERE user_id = %s',
                     (user_id,)
@@ -265,7 +264,6 @@ def send_reminder_to_inactive_users():
 
             except telebot.apihelper.ApiTelegramException as e:
                 if e.error_code == 403:
-                    # کاربر ربات را بلاک کرده
                     logger.info(f"User {user_id} has blocked the bot, removing from activity tracking")
                     cur.execute('DELETE FROM user_activity WHERE user_id = %s', (user_id,))
                     conn.commit()
@@ -275,7 +273,7 @@ def send_reminder_to_inactive_users():
                 logger.error(f"Error sending reminder to user {user_id}: {e}")
 
         cur.close()
-        return len(inactive_users)
+        return reminder_count
 
     except Exception as e:
         logger.error(f"Error in send_reminder_to_inactive_users: {e}")
@@ -284,19 +282,21 @@ def send_reminder_to_inactive_users():
         if conn:
             put_conn(conn)
 
+
 def reminder_loop():
     """
-    حلقه چک کردن کاربران غیرفعال هر 1 ساعت
+    حلقه چک کردن کاربران غیرفعال هر 30 ثانیه (برای تست)
     """
+    logger.info("Reminder loop started - checking every 30 seconds for users inactive for 1 minute")
     while True:
         try:
             count = send_reminder_to_inactive_users()
             if count > 0:
                 logger.info(f"Sent reminders to {count} inactive users")
-            time.sleep(60)  # هر 1 ساعت چک کن
+            time.sleep(30)  # هر 30 ثانیه چک کن برای تست
         except Exception as e:
             logger.error(f"Error in reminder loop: {e}")
-            time.sleep(300)  # اگر خطا داشت، 5 دقیقه صبر کن و دوباره تلاش کن
+            time.sleep(60)  # اگر خطا داشت، 1 دقیقه صبر کن
 
 
 # ---------------- Email helper ----------------
@@ -370,18 +370,11 @@ def send_start_email(user):
 
 # ---------- Database (Postgres) ----------
 def create_table():
-    """
-    ایجاد جدول videos در Postgres با همان ساختار.
-    از ThreadedConnectionPool استفاده می‌کنیم تا در تردها امن باشد.
-    """
     init_db_pool()
     conn = None
     try:
         conn = get_conn()
         cur = conn.cursor()
-        # create safe category list for CHECK
-        # توجه: در SQL از علامت ' استفاده می‌کنیم، امن شد با sql.Literal در psycopg2.sql
-        # اما برای سادگی و چون CATEGORIES تحت کنترل ماست، از joining امن استفاده می‌کنیم.
         cat_list_sql = ",".join([f"'{c}'" for c in CATEGORIES])
         create_sql = f'''
             CREATE TABLE IF NOT EXISTS videos
@@ -1036,7 +1029,6 @@ def main():
         logger.info("Starting bot with self-ping, ping endpoint, and reminder system...")
         print("🤖 ربات فعال شد!")
 
-        # ایجاد جداول مورد نیاز
         create_table()
         create_user_activity_table()
 
@@ -1048,12 +1040,10 @@ def main():
         ping_thread.start()
         logger.info("Self-ping thread started.")
 
-        # شروع سیستم یادآوری
         reminder_thread = threading.Thread(target=reminder_loop, daemon=True)
         reminder_thread.start()
         logger.info("Reminder system started.")
 
-        # Remove any existing webhook before starting polling to avoid 409 conflicts
         try:
             bot.remove_webhook()
             logger.info("Removed existing webhook (if any). Starting long polling.")
@@ -1072,7 +1062,6 @@ def main():
         logger.error(f"Bot crashed: {e}")
         print(f"❌ خطا در اجرای ربات: {e}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
