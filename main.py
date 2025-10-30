@@ -479,7 +479,7 @@ def show_my_videos(message):
     # نمایش دسته‌بندی‌ها برای مشاهده
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     markup.add(*CATEGORIES)
-    markup.add('📋 همه ویدیوها', '/home')
+    markup.add( '/home')
     msg = bot.reply_to(message,
                        "لطفاً دسته‌بندی مورد نظر برای مشاهده ویدیوها را انتخاب کنید (ویدیوهای تمام کاربران نمایش داده می‌شوند):",
                        reply_markup=markup)
