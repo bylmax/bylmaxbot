@@ -154,18 +154,14 @@ def create_user_activity_table():
         create_sql = '''
                      CREATE TABLE IF NOT EXISTS user_activity
                      (
-                         user_id
-                         BIGINT
-                         PRIMARY
+                         user_id \
+                         BIGINT \
+                         PRIMARY \
                          KEY,
-                         last_activity
-                         TIMESTAMP
-                         DEFAULT
-                         CURRENT_TIMESTAMP,
-                         reminder_sent
-                         BOOLEAN
-                         DEFAULT
-                         FALSE
+                         last_activity \
+                         TIMESTAMP \
+                         DEFAULT \
+                         CURRENT_TIMESTAMP
                      ); \
                      '''
         cur.execute(create_sql)
@@ -194,13 +190,11 @@ def update_user_activity(user_id):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute('''
-            INSERT INTO user_activity (user_id, last_activity, reminder_sent)
-            VALUES (%s, CURRENT_TIMESTAMP, FALSE)
-            ON CONFLICT (user_id) 
-            DO UPDATE SET 
-                last_activity = CURRENT_TIMESTAMP,
-                reminder_sent = FALSE
-        ''', (user_id,))
+                    INSERT INTO user_activity (user_id, last_activity)
+                    VALUES (%s, CURRENT_TIMESTAMP) ON CONFLICT (user_id) 
+            DO
+                    UPDATE SET last_activity = CURRENT_TIMESTAMP
+                    ''', (user_id,))
         conn.commit()
         cur.close()
         return True
@@ -217,67 +211,84 @@ def update_user_activity(user_id):
             put_conn(conn)
 
 
-def send_reminder_to_inactive_users():
+def get_inactive_users():
     """
-    ارسال پیام یادآوری به کاربرانی که 1 دقیقه از آخرین فعالیتشان گذشته (برای تست)
+    دریافت کاربرانی که 1 دقیقه از آخرین فعالیتشان گذشته
     """
     conn = None
     try:
         conn = get_conn()
         cur = conn.cursor()
-
-        # برای تست: 1 دقیقه به جای 24 ساعت
         cur.execute('''
                     SELECT user_id
                     FROM user_activity
                     WHERE last_activity < NOW() - INTERVAL '1 minute'
-                      AND reminder_sent = FALSE
                     ''')
         inactive_users = cur.fetchall()
-
-        reminder_count = 0
-        for (user_id,) in inactive_users:
-            try:
-                mess = random.choice([
-                    "خبر فوری!\n چند وقته با هم تنها نبودیم💖",
-                    "کشف تازه دانشمندان \n ربات bylmax باعث آرامش روح می شود",
-                    "دکتر حسابی می گوید: \n ربات bylmax باعث جلو گیری از سکته مغزی می شود",
-                    "سلام شنیدم بیکاری \n بیا به ربات و ...",
-                    "همه چی برای تو \n گروه bylmax ?تمام تلاششونو دارن برات می کنن نمی خوای ببینی",
-                    "لقب جدید bylmax \n یاور همیشه مومن لقب جدید bylmax چون همیشه دوست داره",
-                    "کاملا رایگان \n bylmax به صورت کاملا رایگان در اختیار شماست",
-                    "صاحب واقعی bylmax کیست ؟ \n معلومه دیگه خودتی🌹",
-                    "خودتو امتحان کن! \n به نظرت کارت تو bylmax چند دقیقه طول می کشه",
-                    "برنج نیستی اما \n خوب بلدم خیست کنم🌊"
-                ])
-
-                bot.send_message(user_id, mess)
-                reminder_count += 1
-
-                cur.execute(
-                    'UPDATE user_activity SET reminder_sent = TRUE WHERE user_id = %s',
-                    (user_id,)
-                )
-                conn.commit()
-
-                logger.info(f"Reminder sent to user {user_id}")
-
-            except telebot.apihelper.ApiTelegramException as e:
-                if e.error_code == 403:
-                    logger.info(f"User {user_id} has blocked the bot, removing from activity tracking")
-                    cur.execute('DELETE FROM user_activity WHERE user_id = %s', (user_id,))
-                    conn.commit()
-                else:
-                    logger.error(f"Error sending reminder to user {user_id}: {e}")
-            except Exception as e:
-                logger.error(f"Error sending reminder to user {user_id}: {e}")
-
         cur.close()
-        return reminder_count
-
+        return [user_id for (user_id,) in inactive_users]
     except Exception as e:
-        logger.error(f"Error in send_reminder_to_inactive_users: {e}")
-        return 0
+        logger.error(f"Error getting inactive users: {e}")
+        return []
+    finally:
+        if conn:
+            put_conn(conn)
+
+
+def send_reminder_to_user(user_id):
+    """
+    ارسال پیام یادآوری به یک کاربر خاص
+    """
+    try:
+        mess = random.choice([
+            "خبر فوری!\n چند وقته با هم تنها نبودیم💖",
+            "کشف تازه دانشمندان \n ربات bylmax باعث آرامش روح می شود",
+            "دکتر حسابی می گوید: \n ربات bylmax باعث جلو گیری از سکته مغزی می شود",
+            "سلام شنیدم بیکاری \n بیا به ربات و ...",
+            "همه چی برای تو \n گروه bylmax ?تمام تلاششونو دارن برات می کنن نمی خوای ببینی",
+            "لقب جدید bylmax \n یاور همیشه مومن لقب جدید bylmax چون همیشه دوست داره",
+            "کاملا رایگان \n bylmax به صورت کاملا رایگان در اختیار شماست",
+            "صاحب واقعی bylmax کیست ؟ \n معلومه دیگه خودتی🌹",
+            "خودتو امتحان کن! \n به نظرت کارت تو bylmax چند دقیقه طول می کشه",
+            "برنج نیستی اما \n خوب بلدم خیست کنم🌊"
+        ])
+
+        bot.send_message(user_id, mess)
+        logger.info(f"Reminder sent to user {user_id}")
+        return True
+
+    except telebot.apihelper.ApiTelegramException as e:
+        if e.error_code == 403:
+            logger.info(f"User {user_id} has blocked the bot, removing from activity tracking")
+            remove_user_from_activity(user_id)
+            return False
+        else:
+            logger.error(f"Error sending reminder to user {user_id}: {e}")
+            return False
+    except Exception as e:
+        logger.error(f"Error sending reminder to user {user_id}: {e}")
+        return False
+
+
+def remove_user_from_activity(user_id):
+    """
+    حذف کاربر از جدول فعالیت
+    """
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM user_activity WHERE user_id = %s', (user_id,))
+        conn.commit()
+        cur.close()
+        logger.info(f"User {user_id} removed from activity tracking")
+    except Exception as e:
+        logger.error(f"Error removing user from activity: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
     finally:
         if conn:
             put_conn(conn)
@@ -285,18 +296,26 @@ def send_reminder_to_inactive_users():
 
 def reminder_loop():
     """
-    حلقه چک کردن کاربران غیرفعال هر 30 ثانیه (برای تست)
+    حلقه چک کردن کاربران غیرفعال هر 1 دقیقه
     """
-    logger.info("Reminder loop started - checking every 30 seconds for users inactive for 1 minute")
+    logger.info("Reminder loop started - checking every 60 seconds for users inactive for 1 minute")
     while True:
         try:
-            count = send_reminder_to_inactive_users()
-            if count > 0:
-                logger.info(f"Sent reminders to {count} inactive users")
-            time.sleep(30)  # هر 30 ثانیه چک کن برای تست
+            inactive_users = get_inactive_users()
+            reminder_count = 0
+
+            for user_id in inactive_users:
+                if send_reminder_to_user(user_id):
+                    reminder_count += 1
+
+            if reminder_count > 0:
+                logger.info(f"Sent reminders to {reminder_count} inactive users")
+
+            time.sleep(60)  # هر 1 دقیقه چک کن
+
         except Exception as e:
             logger.error(f"Error in reminder loop: {e}")
-            time.sleep(3600)  # اگر خطا داشت، 1 دقیقه صبر کن
+            time.sleep(60)  # اگر خطا داشت، 1 دقیقه صبر کن
 
 
 # ---------------- Email helper ----------------
@@ -1026,7 +1045,7 @@ def send_protected_video(chat_id, video_id, caption=None, **kwargs):
 # ----------------- main -----------------
 def main():
     try:
-        logger.info("Starting bot with self-ping, ping endpoint, and reminder system...")
+        logger.info("Starting bot with self-ping, ping endpoint, and continuous reminder system...")
         print("🤖 ربات فعال شد!")
 
         create_table()
@@ -1042,7 +1061,7 @@ def main():
 
         reminder_thread = threading.Thread(target=reminder_loop, daemon=True)
         reminder_thread.start()
-        logger.info("Reminder system started.")
+        logger.info("Continuous reminder system started.")
 
         try:
             bot.remove_webhook()
