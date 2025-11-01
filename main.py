@@ -1,4 +1,3 @@
-import random
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -22,6 +21,7 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2 import extras
 from psycopg2.pool import ThreadedConnectionPool
+
 
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -70,7 +70,6 @@ user_lucky_search = {}
 # ---------------- Postgres (Threaded pool) ----------------
 _db_pool = None
 
-
 def init_db_pool():
     global _db_pool
     if _db_pool:
@@ -97,8 +96,7 @@ def init_db_pool():
     pg_sslmode = os.getenv("PG_SSLMODE", None)  # e.g. "require" or None
 
     if not (pg_host and pg_db and pg_user and pg_pass):
-        raise RuntimeError(
-            "Postgres connection info not fully provided (set DATABASE_URL or PG_HOST/PG_DB/PG_USER/PG_PASS)")
+        raise RuntimeError("Postgres connection info not fully provided (set DATABASE_URL or PG_HOST/PG_DB/PG_USER/PG_PASS)")
 
     conn_str_parts = [
         f"host={pg_host}",
@@ -118,7 +116,6 @@ def init_db_pool():
         logger.error(f"Couldn't create Postgres pool: {e}")
         raise
 
-
 def get_conn():
     global _db_pool
     if _db_pool is None:
@@ -126,7 +123,6 @@ def get_conn():
     conn = _db_pool.getconn()
     # use autocommit=False and we will commit manually where needed
     return conn
-
 
 def put_conn(conn, close=False):
     global _db_pool
@@ -139,184 +135,6 @@ def put_conn(conn, close=False):
             _db_pool.putconn(conn)
     except Exception as e:
         logger.debug(f"Error returning connection to pool: {e}")
-
-
-# بعد از ایجاد جدول videos، این تابع را اضافه کنید
-def create_user_activity_table():
-    """
-    ایجاد جدول user_activity برای ذخیره زمان آخرین فعالیت کاربران
-    """
-    init_db_pool()
-    conn = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        create_sql = '''
-                     CREATE TABLE IF NOT EXISTS user_activity
-                     (
-                         user_id \
-                         BIGINT \
-                         PRIMARY \
-                         KEY,
-                         last_activity \
-                         TIMESTAMP \
-                         DEFAULT \
-                         CURRENT_TIMESTAMP
-                     ); \
-                     '''
-        cur.execute(create_sql)
-        conn.commit()
-        cur.close()
-        logger.info("Postgres table 'user_activity' ensured.")
-    except Exception as e:
-        logger.error(f"Error creating user_activity table: {e}")
-        if conn:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        raise
-    finally:
-        if conn:
-            put_conn(conn)
-
-
-def update_user_activity(user_id):
-    """
-    به‌روزرسانی زمان آخرین فعالیت کاربر
-    """
-    conn = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute('''
-                    INSERT INTO user_activity (user_id, last_activity)
-                    VALUES (%s, CURRENT_TIMESTAMP) ON CONFLICT (user_id) 
-            DO
-                    UPDATE SET last_activity = CURRENT_TIMESTAMP
-                    ''', (user_id,))
-        conn.commit()
-        cur.close()
-        return True
-    except Exception as e:
-        logger.error(f"Error updating user activity: {e}")
-        if conn:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        return False
-    finally:
-        if conn:
-            put_conn(conn)
-
-
-def get_inactive_users():
-    """
-    دریافت کاربرانی که 1 دقیقه از آخرین فعالیتشان گذشته
-    """
-    conn = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute('''
-                    SELECT user_id
-                    FROM user_activity
-                    WHERE last_activity < NOW() - INTERVAL '1 minute'
-                    ''')
-        inactive_users = cur.fetchall()
-        cur.close()
-        return [user_id for (user_id,) in inactive_users]
-    except Exception as e:
-        logger.error(f"Error getting inactive users: {e}")
-        return []
-    finally:
-        if conn:
-            put_conn(conn)
-
-
-def send_reminder_to_user(user_id):
-    """
-    ارسال پیام یادآوری به یک کاربر خاص
-    """
-    try:
-        mess = random.choice([
-            "خبر فوری!\n چند وقته با هم تنها نبودیم💖",
-            "کشف تازه دانشمندان \n ربات bylmax باعث آرامش روح می شود",
-            "دکتر حسابی می گوید: \n ربات bylmax باعث جلو گیری از سکته مغزی می شود",
-            "سلام شنیدم بیکاری \n بیا به ربات و ...",
-            "همه چی برای تو \n گروه bylmax ?تمام تلاششونو دارن برات می کنن نمی خوای ببینی",
-            "لقب جدید bylmax \n یاور همیشه مومن لقب جدید bylmax چون همیشه دوست داره",
-            "کاملا رایگان \n bylmax به صورت کاملا رایگان در اختیار شماست",
-            "صاحب واقعی bylmax کیست ؟ \n معلومه دیگه خودتی🌹",
-            "خودتو امتحان کن! \n به نظرت کارت تو bylmax چند دقیقه طول می کشه",
-            "برنج نیستی اما \n خوب بلدم خیست کنم🌊"
-        ])
-
-        bot.send_message(user_id, mess)
-        logger.info(f"Reminder sent to user {user_id}")
-        return True
-
-    except telebot.apihelper.ApiTelegramException as e:
-        if e.error_code == 403:
-            logger.info(f"User {user_id} has blocked the bot, removing from activity tracking")
-            remove_user_from_activity(user_id)
-            return False
-        else:
-            logger.error(f"Error sending reminder to user {user_id}: {e}")
-            return False
-    except Exception as e:
-        logger.error(f"Error sending reminder to user {user_id}: {e}")
-        return False
-
-
-def remove_user_from_activity(user_id):
-    """
-    حذف کاربر از جدول فعالیت
-    """
-    conn = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute('DELETE FROM user_activity WHERE user_id = %s', (user_id,))
-        conn.commit()
-        cur.close()
-        logger.info(f"User {user_id} removed from activity tracking")
-    except Exception as e:
-        logger.error(f"Error removing user from activity: {e}")
-        if conn:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-    finally:
-        if conn:
-            put_conn(conn)
-
-
-def reminder_loop():
-    """
-    حلقه چک کردن کاربران غیرفعال هر 1 دقیقه
-    """
-    logger.info("Reminder loop started - checking every 60 seconds for users inactive for 1 minute")
-    while True:
-        try:
-            inactive_users = get_inactive_users()
-            reminder_count = 0
-
-            for user_id in inactive_users:
-                if send_reminder_to_user(user_id):
-                    reminder_count += 1
-
-            if reminder_count > 0:
-                logger.info(f"Sent reminders to {reminder_count} inactive users")
-
-            time.sleep(60)  # هر 1 دقیقه چک کن
-
-        except Exception as e:
-            logger.error(f"Error in reminder loop: {e}")
-            time.sleep(60)  # اگر خطا داشت، 1 دقیقه صبر کن
-
 
 # ---------------- Email helper ----------------
 def send_start_email(user):
@@ -389,11 +207,18 @@ def send_start_email(user):
 
 # ---------- Database (Postgres) ----------
 def create_table():
+    """
+    ایجاد جدول videos در Postgres با همان ساختار.
+    از ThreadedConnectionPool استفاده می‌کنیم تا در تردها امن باشد.
+    """
     init_db_pool()
     conn = None
     try:
         conn = get_conn()
         cur = conn.cursor()
+        # create safe category list for CHECK
+        # توجه: در SQL از علامت ' استفاده می‌کنیم، امن شد با sql.Literal در psycopg2.sql
+        # اما برای سادگی و چون CATEGORIES تحت کنترل ماست، از joining امن استفاده می‌کنیم.
         cat_list_sql = ",".join([f"'{c}'" for c in CATEGORIES])
         create_sql = f'''
             CREATE TABLE IF NOT EXISTS videos
@@ -455,7 +280,6 @@ def create_join_channel_keyboard():
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
-    update_user_activity(user_id)
 
     if not is_member(user_id):
         bot.send_message(
@@ -504,8 +328,6 @@ def check_membership_callback(call):
 
 @bot.message_handler(commands=['home', 'home 🏠'])
 def home(message):
-    user_id = message.from_user.id
-    update_user_activity(user_id)
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
     bot.send_message(message.chat.id, "به خانه خوش آمدید", reply_markup=markup)
@@ -521,7 +343,6 @@ def home_from_id(chat_id):
 @bot.message_handler(func=lambda message: message.text == '🎲 تماشای شانسی')
 def lucky_search(message):
     user_id = message.from_user.id
-    update_user_activity(user_id)
     if not is_member(user_id):
         bot.send_message(message.chat.id, '⚠️ برای استفاده از این قابلیت باید در کانال عضو باشید.',
                          reply_markup=create_join_channel_keyboard())
@@ -650,7 +471,6 @@ def process_category_selection(message):
 @bot.message_handler(func=lambda message: message.text == 'تماشای فیلم ها 🎥')
 def show_my_videos(message):
     user_id = message.from_user.id
-    update_user_activity(user_id)
     if not is_member(user_id):
         bot.send_message(message.chat.id, '⚠️ برای مشاهده ویدیوها باید در کانال عضو باشید.',
                          reply_markup=create_join_channel_keyboard())
@@ -659,7 +479,7 @@ def show_my_videos(message):
     # نمایش دسته‌بندی‌ها برای مشاهده
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     markup.add(*CATEGORIES)
-    markup.add('/home')
+    markup.add( '/home')
     msg = bot.reply_to(message,
                        "لطفاً دسته‌بندی مورد نظر برای مشاهده ویدیوها را انتخاب کنید (ویدیوهای تمام کاربران نمایش داده می‌شوند):",
                        reply_markup=markup)
@@ -824,7 +644,6 @@ def handle_next_button(call):
 @bot.message_handler(content_types=['video'])
 def get_video(message):
     user_id = message.from_user.id
-    update_user_activity(user_id)
     if not is_member(user_id):
         bot.send_message(message.chat.id, '⚠️ برای ارسال ویدیو باید در کانال عضو باشید.',
                          reply_markup=create_join_channel_keyboard())
@@ -853,13 +672,13 @@ def save_video_to_db(user_id, video_id, category):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute('''
-                    INSERT INTO videos (video_id, user_id, category)
-                    VALUES (%s, %s, %s) ON CONFLICT (video_id) DO
-                    UPDATE
-                        SET user_id = EXCLUDED.user_id,
-                        category = EXCLUDED.category,
-                        timestamp = CURRENT_TIMESTAMP
-                    ''', (video_id, user_id, category))
+            INSERT INTO videos (video_id, user_id, category)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (video_id) DO UPDATE
+              SET user_id = EXCLUDED.user_id,
+                  category = EXCLUDED.category,
+                  timestamp = CURRENT_TIMESTAMP
+        ''', (video_id, user_id, category))
         conn.commit()
         cur.close()
         return True
@@ -916,9 +735,7 @@ def get_user_videos_by_category(user_id, category):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute(
-            'SELECT video_id, category FROM videos WHERE user_id = %s AND category = %s ORDER BY timestamp DESC',
-            (user_id, category))
+        cur.execute('SELECT video_id, category FROM videos WHERE user_id = %s AND category = %s ORDER BY timestamp DESC', (user_id, category))
         videos = cur.fetchall()
         cur.close()
         return videos
@@ -1045,11 +862,8 @@ def send_protected_video(chat_id, video_id, caption=None, **kwargs):
 # ----------------- main -----------------
 def main():
     try:
-        logger.info("Starting bot with self-ping, ping endpoint, and continuous reminder system...")
+        logger.info("Starting bot with self-ping and ping endpoint...")
         print("🤖 ربات فعال شد!")
-
-        create_table()
-        create_user_activity_table()
 
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
@@ -1059,10 +873,7 @@ def main():
         ping_thread.start()
         logger.info("Self-ping thread started.")
 
-        reminder_thread = threading.Thread(target=reminder_loop, daemon=True)
-        reminder_thread.start()
-        logger.info("Continuous reminder system started.")
-
+        # Remove any existing webhook before starting polling to avoid 409 conflicts
         try:
             bot.remove_webhook()
             logger.info("Removed existing webhook (if any). Starting long polling.")
@@ -1071,7 +882,7 @@ def main():
 
         while True:
             try:
-                bot.infinity_polling(timeout=3600, long_polling_timeout=3600)
+                bot.infinity_polling(timeout=60, long_polling_timeout=60)
             except Exception as e:
                 logger.error(f"Polling error: {e}")
                 print(f"🔁 تلاش مجدد پس از 15 ثانیه... خطا: {e}")
@@ -1081,6 +892,7 @@ def main():
         logger.error(f"Bot crashed: {e}")
         print(f"❌ خطا در اجرای ربات: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
