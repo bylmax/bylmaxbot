@@ -537,38 +537,30 @@ def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=5, categor
     start_idx = page * page_size
     end_idx = min(start_idx + page_size, total_videos)
 
-    # حذف پیام‌های قبلی اگر وجود داشته باشند (برای همه صفحات)
     if user_id in user_pagination and 'message_ids' in user_pagination[user_id]:
         delete_messages(chat_id, user_pagination[user_id]['message_ids'])
         user_pagination[user_id]['message_ids'] = []
 
     for i in range(start_idx, end_idx):
-        video_info = videos[i]
-        video_id = None
-        caption_parts = []
-        if isinstance(video_info, tuple):
-            if len(video_info) >= 2:
-                second = video_info[1]
-                if isinstance(second, int):
-                    video_id = video_info[0]
-                    if len(video_info) > 2:
-                        caption_parts.append(f"دسته‌بندی: {video_info[2]}")
-                else:
-                    video_id = video_info[0]
-                    caption_parts.append(f"دسته‌بندی: {second}")
-            else:
-                video_id = video_info[0]
-        else:
-            video_id = video_info
+        row = videos[i]
 
-        caption = " - ".join(caption_parts) if caption_parts else (f"دسته‌بندی: {category}" if category else "")
+        # استخراج video_id از رکورد - فرض می‌کنیم اولین ستون همیشه video_id است
+        video_id = row[0] if hasattr(row, '__getitem__') else str(row)
+
+        # ساخت caption
+        caption_parts = []
+        if category:
+            caption_parts.append(f"دسته‌بندی: {category}")
+        elif len(row) > 1:  # اگر دسته‌بندی در رکورد وجود دارد
+            caption_parts.append(f"دسته‌بندی: {row[1]}")
+
+        caption = " - ".join(caption_parts) if caption_parts else None
+
         try:
-            markup = InlineKeyboardMarkup()
-            markup.add("bylmax", "https://t.me/bylmax_bot")
-            sent_msg = bot.send_video(chat_id, video_id, caption=caption or None, reply_markup=markup)
+            sent_msg = send_protected_video(chat_id, video_id, caption=caption)
             user_pagination[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
-            logger.error(f"خطا در ارسال ویدیو: {e}")
+            logger.error(f"خطا در ارسال ویدیو {video_id}: {e}")
             error_msg = bot.send_message(chat_id, f"خطا در نمایش ویدیو: {video_id}")
             user_pagination[user_id]['message_ids'].append(error_msg.message_id)
 
