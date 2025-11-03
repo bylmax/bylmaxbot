@@ -60,7 +60,7 @@ ping_app = Flask(__name__)
 
 CATEGORIES = [
     "mylf", "step sis", "step mom", "work out", "russian",
-    "big ass", "big tits", "free us", "Sweetie Fox R", "foot fetish", "arab", "asian", "anal", "BBC", "وطنی", "None"
+    "big ass", "big tits", "free us", "Sweetie Fox R","comatozze H", "foot fetish", "arab", "asian", "anal",
 ]
 
 user_categories = {}
