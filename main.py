@@ -360,7 +360,9 @@ def lucky_search(message):
     user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': [], 'chat_id': message.chat.id}
     for i, video in enumerate(random_videos):
         try:
-            sent_msg = send_protected_video(message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}")
+            markup = InlineKeyboardMarkup()
+            markup.add("bylmax", "https://t.me/bylmax_bot")
+            sent_msg = bot.send_video(message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}", reply_markup=markup)
             user_lucky_search[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
@@ -390,7 +392,9 @@ def handle_lucky_again(call):
     user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': [], 'chat_id': call.message.chat.id}
     for i, video in enumerate(random_videos):
         try:
-            sent_msg = bot.send_video(call.message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}")
+            markup = InlineKeyboardMarkup()
+            markup.add("bylmax", "https://t.me/bylmax_bot")
+            sent_msg = bot.send_video(call.message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}",reply_markup=markup)
             user_lucky_search[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
@@ -559,7 +563,9 @@ def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=5, categor
 
         caption = " - ".join(caption_parts) if caption_parts else (f"دسته‌بندی: {category}" if category else "")
         try:
-            sent_msg = send_protected_video(chat_id, video_id, caption=caption or None)
+            markup = InlineKeyboardMarkup()
+            markup.add("bylmax", "https://t.me/bylmax_bot")
+            sent_msg = bot.send_video(chat_id, video_id, caption=caption or None, reply_markup=markup)
             user_pagination[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
@@ -840,23 +846,23 @@ def self_ping_loop():
 
 
 # --- helper wrapper for protected video sending ---
-def send_protected_video(chat_id, video_id, caption=None, **kwargs):
-    """
-    Send video with protect_content=True when possible.
-    If telebot version doesn't accept the parameter, try fallback to plain send_video.
-    Returns the sent message object or raises the underlying exception.
-    """
-    try:
-        # use bot.send_video (not recursive)
-        return bot.send_video(chat_id, video_id, caption=caption, protect_content=True, **kwargs)
-    except TypeError as e:
-        # telebot older version -> doesn't accept protect_content
-        logger.warning(f"bot.send_video doesn't accept protect_content param: {e}. Falling back to plain send_video.")
-        return bot.send_video(chat_id, video_id, caption=caption, **kwargs)
-    except Exception as e:
-        # سایر خطاها را لاگ کن و دوباره پرت کن یا None برگردون (انتخاب شما)
-        logger.error(f"Error sending protected video: {e}")
-        raise
+# def send_protected_video(chat_id, video_id, caption=None, **kwargs):
+#     """
+#     Send video with protect_content=True when possible.
+#     If telebot version doesn't accept the parameter, try fallback to plain send_video.
+#     Returns the sent message object or raises the underlying exception.
+#     """
+#     try:
+#         # use bot.send_video (not recursive)
+#         return bot.send_video(chat_id, video_id, caption=caption, protect_content=True, **kwargs)
+#     except TypeError as e:
+#         # telebot older version -> doesn't accept protect_content
+#         logger.warning(f"bot.send_video doesn't accept protect_content param: {e}. Falling back to plain send_video.")
+#         return bot.send_video(chat_id, video_id, caption=caption, **kwargs)
+#     except Exception as e:
+#         # سایر خطاها را لاگ کن و دوباره پرت کن یا None برگردون (انتخاب شما)
+#         logger.error(f"Error sending protected video: {e}")
+#         raise
 
 
 # ----------------- main -----------------
