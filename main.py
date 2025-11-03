@@ -797,7 +797,28 @@ def handle_all_messages(message):
                          reply_markup=create_join_channel_keyboard())
         return
 
-    bot.send_message(message.chat.id, f'پیام شما دریافت شد: {message.text}')
+    elif message.text == '📋 همه ویدیوها':
+        user_pagination[user_id]['all_videos'] = True
+        videos = get_user_videos(user_id)
+        if videos:
+            send_videos_paginated(user_id, message.chat.id, videos, page=0, page_size=5)
+        else:
+            bot.reply_to(message, "❌ هنوز ویدیویی ارسال نکرده‌اید")
+            home(message)
+    else:
+        chosen = message.text
+        if chosen in CATEGORIES:
+            user_pagination[user_id]['category'] = chosen
+            videos = get_videos_by_category(chosen)  # returns (video_id, user_id)
+            if videos:
+                send_videos_paginated(user_id, message.chat.id, videos, page=0, page_size=5, category=chosen,
+                                      global_category=True)
+            else:
+                bot.reply_to(message, f"❌ ویدیویی در دسته‌بندی {chosen} موجود نیست")
+                home(message)
+        else:
+            bot.reply_to(message, "❌ لطفاً یکی از دسته‌بندی‌های موجود را انتخاب کنید:")
+            show_my_videos(message)
 
 
 # ----------------- بوت راه‌اندازی -----------------
