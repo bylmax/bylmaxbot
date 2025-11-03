@@ -60,7 +60,7 @@ ping_app = Flask(__name__)
 
 CATEGORIES = [
     "mylf", "step sis", "step mom", "work out", "russian",
-    "big ass", "big tits", "free us", "Sweetie Fox R","comatozze H", "foot fetish", "arab", "asian", "anal",
+    "big ass", "big tits", "free us", "Sweetie Fox R", "foot fetish", "arab", "asian", "anal", "BBC", "وطنی", "None"
 ]
 
 user_categories = {}
@@ -275,7 +275,13 @@ def create_join_channel_keyboard():
     markup.add(join_button, check_button)
     return markup
 
-
+def create_video_keyboard():
+    """
+    ایجاد اینلاین کیبورد برای ویدیوها با اسم و آدرس ربات
+    """
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("bylmax", url="https://t.me/bylmax_bot"))
+    return markup
 # ---------- Start / Home ----------
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -360,9 +366,7 @@ def lucky_search(message):
     user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': [], 'chat_id': message.chat.id}
     for i, video in enumerate(random_videos):
         try:
-            markup = InlineKeyboardMarkup()
-            markup.add("bylmax", "https://t.me/bylmax_bot")
-            sent_msg = bot.send_video(message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}", reply_markup=markup)
+            sent_msg = send_protected_video(message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}")
             user_lucky_search[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
@@ -392,9 +396,8 @@ def handle_lucky_again(call):
     user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': [], 'chat_id': call.message.chat.id}
     for i, video in enumerate(random_videos):
         try:
-            markup = InlineKeyboardMarkup()
-            markup.add("bylmax", "https://t.me/bylmax_bot")
-            sent_msg = bot.send_video(call.message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}",reply_markup=markup)
+            # استفاده از تابع send_protected_video برای consistency
+            sent_msg = send_protected_video(call.message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}")
             user_lucky_search[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
@@ -537,30 +540,36 @@ def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=5, categor
     start_idx = page * page_size
     end_idx = min(start_idx + page_size, total_videos)
 
+    # حذف پیام‌های قبلی اگر وجود داشته باشند (برای همه صفحات)
     if user_id in user_pagination and 'message_ids' in user_pagination[user_id]:
         delete_messages(chat_id, user_pagination[user_id]['message_ids'])
         user_pagination[user_id]['message_ids'] = []
 
     for i in range(start_idx, end_idx):
-        row = videos[i]
-
-        # استخراج video_id از رکورد - فرض می‌کنیم اولین ستون همیشه video_id است
-        video_id = row[0] if hasattr(row, '__getitem__') else str(row)
-
-        # ساخت caption
+        video_info = videos[i]
+        video_id = None
         caption_parts = []
-        if category:
-            caption_parts.append(f"دسته‌بندی: {category}")
-        elif len(row) > 1:  # اگر دسته‌بندی در رکورد وجود دارد
-            caption_parts.append(f"دسته‌بندی: {row[1]}")
+        if isinstance(video_info, tuple):
+            if len(video_info) >= 2:
+                second = video_info[1]
+                if isinstance(second, int):
+                    video_id = video_info[0]
+                    if len(video_info) > 2:
+                        caption_parts.append(f"دسته‌بندی: {video_info[2]}")
+                else:
+                    video_id = video_info[0]
+                    caption_parts.append(f"دسته‌بندی: {second}")
+            else:
+                video_id = video_info[0]
+        else:
+            video_id = video_info
 
-        caption = " - ".join(caption_parts) if caption_parts else None
-
+        caption = " - ".join(caption_parts) if caption_parts else (f"دسته‌بندی: {category}" if category else "")
         try:
-            sent_msg = send_protected_video(chat_id, video_id, caption=caption)
+            sent_msg = send_protected_video(chat_id, video_id, caption=caption or None)
             user_pagination[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
-            logger.error(f"خطا در ارسال ویدیو {video_id}: {e}")
+            logger.error(f"خطا در ارسال ویدیو: {e}")
             error_msg = bot.send_message(chat_id, f"خطا در نمایش ویدیو: {video_id}")
             user_pagination[user_id]['message_ids'].append(error_msg.message_id)
 
@@ -859,23 +868,33 @@ def self_ping_loop():
 
 
 # --- helper wrapper for protected video sending ---
-# def send_protected_video(chat_id, video_id, caption=None, **kwargs):
-#     """
-#     Send video with protect_content=True when possible.
-#     If telebot version doesn't accept the parameter, try fallback to plain send_video.
-#     Returns the sent message object or raises the underlying exception.
-#     """
-#     try:
-#         # use bot.send_video (not recursive)
-#         return bot.send_video(chat_id, video_id, caption=caption, protect_content=True, **kwargs)
-#     except TypeError as e:
-#         # telebot older version -> doesn't accept protect_content
-#         logger.warning(f"bot.send_video doesn't accept protect_content param: {e}. Falling back to plain send_video.")
-#         return bot.send_video(chat_id, video_id, caption=caption, **kwargs)
-#     except Exception as e:
-#         # سایر خطاها را لاگ کن و دوباره پرت کن یا None برگردون (انتخاب شما)
-#         logger.error(f"Error sending protected video: {e}")
-#         raise
+def send_protected_video(chat_id, video_id, caption=None, **kwargs):
+    """
+    ارسال ویدیو با قابلیت فروارد و اینلاین کیبورد
+    """
+    try:
+        # استفاده از protect_content=False برای اجازه فروارد
+        return bot.send_video(
+            chat_id,
+            video_id,
+            caption=caption,
+            protect_content=False,  # تغییر به False برای اجازه فروارد
+            reply_markup=create_video_keyboard(),  # اضافه کردن اینلاین کیبورد
+            **kwargs
+        )
+    except TypeError as e:
+        # اگر protect_content پشتیبانی نمی‌شود
+        logger.warning(f"bot.send_video doesn't accept protect_content param: {e}. Falling back to plain send_video.")
+        return bot.send_video(
+            chat_id,
+            video_id,
+            caption=caption,
+            reply_markup=create_video_keyboard(),  # اضافه کردن اینلاین کیبورد
+            **kwargs
+        )
+    except Exception as e:
+        logger.error(f"Error sending video: {e}")
+        raise
 
 
 # ----------------- main -----------------
