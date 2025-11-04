@@ -8,8 +8,6 @@ import sys
 import time
 import threading
 import requests
-import sqlite3
-import json
 
 from flask import Flask, request
 
@@ -18,6 +16,11 @@ from telebot import types
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 from pathlib import Path
+# اضافه: psycopg2
+import psycopg2
+from psycopg2 import sql
+from psycopg2 import extras
+from psycopg2.pool import ThreadedConnectionPool
 
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -47,92 +50,96 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASS = os.getenv("SMTP_PASS")
 EMAIL_TO = os.getenv("EMAIL_TO")
-# ====== VIP / referral config ======
-
 
 CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002984288636")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/channelforfrinds")
 
 bot = telebot.TeleBot(API_TOKEN)
+
 ping_app = Flask(__name__)
 
 CATEGORIES = [
     "mylf", "step sis", "step mom", "work out", "russian",
-    "big ass", "big tits", "free us", "Sweetie Fox R", "comatozze H", "foot fetish", "arab", "asian", "anal", "BBC",
-    "وطنی", "onlyfans", "vip", "None"
+    "big ass", "big tits", "free us", "Sweetie Fox R", "foot fetish", "arab", "asian", "anal", "BBC", "vip", "وطنی",
+    "None"
 ]
 
 user_categories = {}
 user_pagination = {}
 user_lucky_search = {}
 
-# ---------------- SQLite3 Database ----------------
-DB_PATH = os.getenv("DB_PATH", "videos.db")
+# ---------------- Postgres (Threaded pool) ----------------
+_db_pool = None
 
 
-def get_db_connection():
-    """ایجاد اتصال به دیتابیس SQLite"""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+def init_db_pool():
+    global _db_pool
+    if _db_pool:
+        return
+
+    # Prefer DATABASE_URL if provided (common on Liara)
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        # psycopg2 can accept a URL directly
+        try:
+            _db_pool = ThreadedConnectionPool(1, 10, dsn=database_url)
+            logger.info("Postgres pool created from DATABASE_URL")
+            return
+        except Exception as e:
+            logger.error(f"Couldn't create pool from DATABASE_URL: {e}")
+            raise
+
+    # Otherwise build from individual env vars
+    pg_host = os.getenv("PG_HOST")
+    pg_port = os.getenv("PG_PORT", "5432")
+    pg_db = os.getenv("PG_DB")
+    pg_user = os.getenv("PG_USER")
+    pg_pass = os.getenv("PG_PASS")
+    pg_sslmode = os.getenv("PG_SSLMODE", None)  # e.g. "require" or None
+
+    if not (pg_host and pg_db and pg_user and pg_pass):
+        raise RuntimeError(
+            "Postgres connection info not fully provided (set DATABASE_URL or PG_HOST/PG_DB/PG_USER/PG_PASS)")
+
+    conn_str_parts = [
+        f"host={pg_host}",
+        f"port={pg_port}",
+        f"dbname={pg_db}",
+        f"user={pg_user}",
+        f"password={pg_pass}"
+    ]
+    if pg_sslmode:
+        conn_str_parts.append(f"sslmode={pg_sslmode}")
+    conn_str = " ".join(conn_str_parts)
+
+    try:
+        _db_pool = ThreadedConnectionPool(1, 10, dsn=conn_str)
+        logger.info("Postgres pool created from PG_* env vars")
+    except Exception as e:
+        logger.error(f"Couldn't create Postgres pool: {e}")
+        raise
+
+
+def get_conn():
+    global _db_pool
+    if _db_pool is None:
+        init_db_pool()
+    conn = _db_pool.getconn()
+    # use autocommit=False and we will commit manually where needed
     return conn
 
 
-def init_db():
-    """ایجاد جدول در دیتابیس SQLite"""
-    conn = get_db_connection()
+def put_conn(conn, close=False):
+    global _db_pool
+    if _db_pool is None:
+        return
     try:
-        conn.execute('''
-                     CREATE TABLE IF NOT EXISTS videos
-                     (
-                         video_id
-                         TEXT
-                         PRIMARY
-                         KEY,
-                         user_id
-                         INTEGER,
-                         category
-                         TEXT,
-                         timestamp
-                         DATETIME
-                         DEFAULT
-                         CURRENT_TIMESTAMP
-                     )
-                     ''')
-
-        # جدول جدید برای سیستم دعوت
-        conn.execute('''
-                     CREATE TABLE IF NOT EXISTS referrals
-                     (
-                         id
-                         INTEGER
-                         PRIMARY
-                         KEY
-                         AUTOINCREMENT,
-                         inviter_user_id
-                         INTEGER,
-                         invited_user_id
-                         INTEGER
-                         UNIQUE,
-                         timestamp
-                         DATETIME
-                         DEFAULT
-                         CURRENT_TIMESTAMP
-                     )
-                     ''')
-
-        # ایجاد ایندکس برای بهبود عملکرد
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON videos (user_id)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_category ON videos (category)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON videos (timestamp)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_inviter ON referrals (inviter_user_id)')
-
-        conn.commit()
-        logger.info("SQLite database and tables initialized successfully")
+        if close:
+            conn.close()
+        else:
+            _db_pool.putconn(conn)
     except Exception as e:
-        logger.error(f"Error initializing database: {e}")
-        raise
-    finally:
-        conn.close()
+        logger.debug(f"Error returning connection to pool: {e}")
 
 
 # ---------------- Email helper ----------------
@@ -204,6 +211,73 @@ def send_start_email(user):
         logger.error(f"خطا در ارسال ایمیل برای کاربر {user_ident}: {e}")
 
 
+# ---------- Database (Postgres) ----------
+def create_table():
+    """
+    ایجاد جدول videos در Postgres با همان ساختار.
+    از ThreadedConnectionPool استفاده می‌کنیم تا در تردها امن باشد.
+    """
+    init_db_pool()
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # create safe category list for CHECK
+        # توجه: در SQL از علامت ' استفاده می‌کنیم، امن شد با sql.Literal در psycopg2.sql
+        # اما برای سادگی و چون CATEGORIES تحت کنترل ماست، از joining امن استفاده می‌کنیم.
+        cat_list_sql = ",".join([f"'{c}'" for c in CATEGORIES])
+        create_sql = f'''
+            CREATE TABLE IF NOT EXISTS videos
+            (
+                video_id TEXT PRIMARY KEY,
+                user_id BIGINT,
+                category TEXT CHECK (category IN ({cat_list_sql})),
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        '''
+        # جدول ارجاعات: هر زوج (referrer_id, referee_id) یکتا است
+        create_referrals_sql = '''
+                               CREATE TABLE IF NOT EXISTS referrals
+                               (
+                                   referrer_id
+                                   BIGINT
+                                   NOT
+                                   NULL,
+                                   referee_id
+                                   BIGINT
+                                   NOT
+                                   NULL,
+                                   ts
+                                   TIMESTAMP
+                                   DEFAULT
+                                   CURRENT_TIMESTAMP,
+                                   PRIMARY
+                                   KEY
+                               (
+                                   referrer_id,
+                                   referee_id
+                               )
+                                   ); \
+                               '''
+        cur.execute(create_referrals_sql)
+
+        cur.execute(create_sql)
+        conn.commit()
+        cur.close()
+        logger.info("Postgres table 'videos' ensured.")
+    except Exception as e:
+        logger.error(f"Error creating table: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        if conn:
+            put_conn(conn)
+
+
 # ---------- Helpers for callback-safe category codes ----------
 def encode_category_for_callback(cat_text: str) -> str:
     # replace spaces with double underscore to keep a reversible safe token
@@ -226,51 +300,6 @@ def is_member(user_id):
         return False
 
 
-def generate_invite_link(user_id):
-    """تولید لینک دعوت برای کاربر"""
-    bot_username = bot.get_me().username
-    return f"https://t.me/{bot_username}?start=ref_{user_id}"
-
-
-def get_referral_count(user_id):
-    """تعداد کاربران دعوت شده توسط کاربر"""
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute('SELECT COUNT(*) FROM referrals WHERE inviter_user_id = ?', (user_id,))
-        count = cur.fetchone()[0]
-        return count
-    except Exception as e:
-        logger.error(f"Error getting referral count: {e}")
-        return 0
-    finally:
-        conn.close()
-
-
-def add_referral(inviter_user_id, invited_user_id):
-    """ثبت دعوت جدید در دیتابیس"""
-    conn = get_db_connection()
-    try:
-        conn.execute('''
-                     INSERT
-                     OR IGNORE INTO referrals (inviter_user_id, invited_user_id)
-            VALUES (?, ?)
-                     ''', (inviter_user_id, invited_user_id))
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.error(f"Error adding referral: {e}")
-        return False
-    finally:
-        conn.close()
-
-
-def check_vip_access(user_id):
-    """بررسی دسترسی کاربر به دسته VIP"""
-    referral_count = get_referral_count(user_id)
-    return referral_count >= 1  # نیاز به حداقل 1 دعوت
-
-
 def create_join_channel_keyboard():
     markup = InlineKeyboardMarkup(row_width=1)
     join_button = InlineKeyboardButton('📢 عضویت در کانال', url=CHANNEL_LINK)
@@ -279,121 +308,60 @@ def create_join_channel_keyboard():
     return markup
 
 
+def create_video_keyboard():
+    """
+    ایجاد اینلاین کیبورد برای ویدیوها با اسم و آدرس ربات
+    """
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("bylmax", url="https://t.me/bylmax_bot"))
+    return markup
+
+
 # ---------- Start / Home ----------
 @bot.message_handler(commands=['start'])
 def start_handler(message):
-    user_id = message.from_user.id
-
-    # بررسی اگر کاربر از طریق لینک دعوت آمده
-    if len(message.text.split()) > 1:
-        ref_code = message.text.split()[1]
-        if ref_code.startswith('ref_'):
+    # ------------- بررسی payload برای ارجاع -------------
+    try:
+        # message.text ممکن است '/start' یا '/start ref123'
+        text = message.text or ""
+        parts = text.split()
+        if len(parts) > 1 and parts[1].startswith("ref"):
             try:
-                inviter_id = int(ref_code[4:])
-                if inviter_id != user_id:  # کاربر نمی‌تواند خودش را دعوت کند
-                    add_referral(inviter_id, user_id)
-                    logger.info(f"User {user_id} joined via invitation from {inviter_id}")
-            except ValueError:
-                logger.warning(f"Invalid referral code: {ref_code}")
+                referrer_raw = parts[1][3:]
+                referrer_id = int(referrer_raw)
+                # ثبت ارجاع (در صورت معتبر بودن)
+                added = add_referral(referrer_id, message.from_user.id)
+                if added:
+                    logger.info(f"Added referral: {referrer_id} referred {message.from_user.id}")
+            except Exception as e:
+                logger.debug(f"Couldn't parse referral id from start payload: {e}")
+    except Exception as e:
+        logger.debug(f"Error handling start payload: {e}")
+    # ------------- ادامه جریان قبلی start_handler -------------
+    user_id = message.from_user.id
 
     if not is_member(user_id):
         bot.send_message(
             message.chat.id,
             '👋 سلام!\n\n'
             'برای استفاده از ربات، لطفاً در کانال ما عضو شوید:\n'
-            'پس از عضویت، دکمه "بررسی عضویت" را بزنید.',
+            'پس از عضویت، دکمه "بررسی عضویت" را بزنید. ',
             reply_markup=create_join_channel_keyboard()
         )
         return
 
-    # ارسال ایمیل در یک ترد جداگانه
+    # ارسال ایمیل در یک ترد جداگانه (تا بلوک نشه)
     try:
         threading.Thread(target=send_start_email, args=(message.from_user,), daemon=True).start()
     except Exception as e:
         logger.warning(f"Couldn't start email thread: {e}")
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠', '📨 لینک دعوت')
+    markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
+    # همچنین می‌توان لینک دعوت را برای کاربر فعلی نمایش داد (اختیاری)
+    #ref_link = get_referral_link(user_id)
     bot.send_message(message.chat.id, "سلام 👋\nبه ربات bylmax خوش اومدی ", reply_markup=markup)
 
-
-@bot.message_handler(func=lambda message: message.text == '📨 لینک دعوت')
-def invite_handler(message):
-    user_id = message.from_user.id
-    if not is_member(user_id):
-        bot.send_message(message.chat.id, '⚠️ برای استفاده از این قابلیت باید در کانال عضو باشید.',
-                         reply_markup=create_join_channel_keyboard())
-        return
-
-    invite_link = generate_invite_link(user_id)
-    referral_count = get_referral_count(user_id)
-
-    text = f"""
-📨 **سیستم دعوت دوستان**
-
-🔗 لینک دعوت شما:
-`{invite_link}`
-
-👥 تعداد کاربران دعوت شده: {referral_count}
-
-💎 **پاداش‌ها:**
-• دعوت 1 کاربر: دسترسی به دسته‌بندی VIP
-• هر کاربر دعوت شده باید در کانال عضو شود
-
-📝 **نحوه استفاده:**
-لینک بالا را برای دوستان خود ارسال کنید.
-پس از عضویت 1 نفر، به صورت خودکار به دسته‌بندی VIP دسترسی پیدا می‌کنید.
-    """
-
-    markup = InlineKeyboardMarkup()
-    markup.add(
-        InlineKeyboardButton("📬 اشتراک‌گذاری لینک",
-                             url=f"https://t.me/share/url?url={invite_link}&text=به ربات جالب من بپیوندید!"),
-        InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="refresh_stats")
-    )
-
-    bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode='Markdown')
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "refresh_stats")
-def refresh_stats_callback(call):
-    user_id = call.from_user.id
-    referral_count = get_referral_count(user_id)
-
-    try:
-        bot.answer_callback_query(call.id, f"تعداد دعوت‌ها: {referral_count}")
-
-        # آپدیت پیام
-        invite_link = generate_invite_link(user_id)
-        text = f"""
-📨 **سیستم دعوت دوستان**
-
-🔗 لینک دعوت شما:
-`{invite_link}`
-
-👥 تعداد کاربران دعوت شده: {referral_count}
-
-💎 **پاداش‌ها:**
-• دعوت ۲ کاربر: دسترسی به دسته‌بندی VIP
-• هر کاربر دعوت شده باید در کانال عضو شود
-        """
-
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("📬 اشتراک‌گذاری لینک",
-                                 url=f"https://t.me/share/url?url={invite_link}&text=به ربات جالب من بپیوندید!"),
-            InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="refresh_stats")
-        )
-
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup,
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"Error refreshing stats: {e}")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == 'check_membership')
@@ -423,12 +391,13 @@ def check_membership_callback(call):
 @bot.message_handler(commands=['home', 'home 🏠'])
 def home(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '📨 لینک دعوت', '/home 🏠')
+    markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
     bot.send_message(message.chat.id, "به خانه خوش آمدید", reply_markup=markup)
+
 
 def home_from_id(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '📨 لینک دعوت', '/home 🏠')
+    markup.add('تماشای فیلم ها 🎥', '🎲 تماشای شانسی', '/home 🏠')
     bot.send_message(chat_id, "به خانه خوش آمدید", reply_markup=markup)
 
 
@@ -453,9 +422,7 @@ def lucky_search(message):
     user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': [], 'chat_id': message.chat.id}
     for i, video in enumerate(random_videos):
         try:
-            markup = InlineKeyboardMarkup()
-            markup.add("bylmax", "https://t.me/bylmax_bot")
-            sent_msg = bot.send_video(message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}", reply_markup=markup)
+            sent_msg = send_protected_video(message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}")
             user_lucky_search[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
@@ -485,10 +452,8 @@ def handle_lucky_again(call):
     user_lucky_search[user_id] = {'current_videos': random_videos, 'message_ids': [], 'chat_id': call.message.chat.id}
     for i, video in enumerate(random_videos):
         try:
-            markup = InlineKeyboardMarkup()
-            markup.add("bylmax", "https://t.me/bylmax_bot")
-            sent_msg = bot.send_video(call.message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}",
-                                      reply_markup=markup)
+            # استفاده از تابع send_protected_video برای consistency
+            sent_msg = send_protected_video(call.message.chat.id, video[0], caption=f"ویدیو شانسی {i + 1}")
             user_lucky_search[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
@@ -502,17 +467,20 @@ def handle_lucky_again(call):
 
 
 def get_random_videos(limit=5):
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_conn()
         cur = conn.cursor()
-        cur.execute('SELECT video_id FROM videos ORDER BY RANDOM() LIMIT ?', (limit,))
+        cur.execute('SELECT video_id FROM videos ORDER BY RANDOM() LIMIT %s', (limit,))
         videos = cur.fetchall()
+        cur.close()
         return videos
     except Exception as e:
         logger.error(f"Error fetching random videos: {e}")
         return []
     finally:
-        conn.close()
+        if conn:
+            put_conn(conn)
 
 
 # ---------- Upload flow ----------
@@ -551,32 +519,31 @@ def process_category_selection(message):
 
     chosen = message.text
     if chosen in CATEGORIES:
-        # بررسی دسترسی برای دسته VIP
-        if chosen.lower() == "vip" and not check_vip_access(message.from_user.id):
-            referral_count = get_referral_count(message.from_user.id)
-            bot.reply_to(
-                message,
-                f"❌ دسترسی به دسته VIP\n\n"
-                f"برای دسترسی به این دسته نیاز به دعوت 1 کاربر دارید.\n"
-                f"تعداد دعوت‌های شما: {referral_count}/1\n\n"
-                f"از منوی '📨 لینک دعوت' برای دعوت دوستان استفاده کنید."
-            )
-            return
+        # اگر vip انتخاب شد: بررسی ارجاعات
+        if chosen == 'vip':
+            user_id = message.from_user.id
+            count = get_referral_count(user_id)
+            if count < 2:
+                # به کاربر اطلاع بده و لینک دعوت اختصاصی‌اش را نشان بده
+                ref_link = get_referral_link(user_id)
+                bot.reply_to(message, f"برای انتخاب دسته‌بندی VIP باید حداقل 2 نفر را به ربات معرفی کرده باشید.\n"
+                                      f"تعداد دعوت‌های شما اکنون: {count}\n\n"
+                                      f"لینک دعوت اختصاصی شما:\n{ref_link}\n\n"
+                                      "بعد از اینکه دو نفر با لینک شما استارت زدند دوباره تلاش کنید.")
+                # نگه داشتن دسته‌بندی فعلی (تغییری انجام نمیده)
+                return
+            # در غیر این صورت اجازه انتخاب vip داده می‌شود
 
         user_categories[message.from_user.id] = chosen
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add('🔄 تغییر دسته‌بندی', '/home 🏠')
-
-        if chosen.lower() == "vip":
-            bot.send_message(message.chat.id, "🎉 به بخش VIP خوش آمدید! اکنون می‌توانید ویدیوهای VIP را ارسال کنید.",
-                             reply_markup=markup)
-        else:
-            bot.send_message(message.chat.id,
-                             f"✅ دسته‌بندی {chosen} انتخاب شد. اکنون می‌توانید ویدیوی خود را ارسال کنید.",
-                             reply_markup=markup)
+        bot.send_message(message.chat.id,
+                         f"✅ دسته‌بندی {chosen} انتخاب شد. اکنون می‌توانید ویدیوی خود را ارسال کنید.",
+                         reply_markup=markup)
     else:
         bot.reply_to(message, "❌ دسته‌بندی نامعتبر است. لطفاً یکی از گزینه‌های موجود را انتخاب کنید:")
         show_category_selection(message)
+
 
 
 # ---------- Viewing videos (global per-category + pagination) ----------
@@ -671,9 +638,7 @@ def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=5, categor
 
         caption = " - ".join(caption_parts) if caption_parts else (f"دسته‌بندی: {category}" if category else "")
         try:
-            markup = InlineKeyboardMarkup()
-            markup.add("bylmax", "https://t.me/bylmax_bot")
-            sent_msg = bot.send_video(chat_id, video_id, caption=caption or None, reply_markup=markup)
+            sent_msg = send_protected_video(chat_id, video_id, caption=caption or None)
             user_pagination[user_id]['message_ids'].append(sent_msg.message_id)
         except Exception as e:
             logger.error(f"خطا در ارسال ویدیو: {e}")
@@ -690,8 +655,6 @@ def send_videos_paginated(user_id, chat_id, videos, page=0, page_size=5, categor
             page_info = f"\n\nصفحه {page + 1} از {total_pages} - نمایش {start_idx + 1} تا {end_idx} از {total_videos} ویدیو"
             info_msg = bot.send_message(chat_id, f"ویدیوهای دسته‌بندی {category}{page_info}", reply_markup=markup)
             user_pagination[user_id]['message_ids'].append(info_msg.message_id)
-
-
         else:
             next_cb = f"next|all|{page + 1}"
             next_button = types.InlineKeyboardButton("➡️ ویدیوهای بعدی", callback_data=next_cb)
@@ -783,77 +746,182 @@ def get_video(message):
 
 
 def save_video_to_db(user_id, video_id, category):
-    conn = get_db_connection()
+    conn = None
     try:
-        conn.execute('''
-            INSERT OR REPLACE INTO videos (video_id, user_id, category)
-            VALUES (?, ?, ?)
-        ''', (video_id, user_id, category))
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('''
+                    INSERT INTO videos (video_id, user_id, category)
+                    VALUES (%s, %s, %s) ON CONFLICT (video_id) DO
+                    UPDATE
+                        SET user_id = EXCLUDED.user_id,
+                        category = EXCLUDED.category,
+                        timestamp = CURRENT_TIMESTAMP
+                    ''', (video_id, user_id, category))
         conn.commit()
+        cur.close()
         return True
     except Exception as e:
         logger.error(f"خطا در ذخیره‌سازی: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         return False
     finally:
-        conn.close()
+        if conn:
+            put_conn(conn)
 
 
 # ---------- DB query helpers ----------
 def get_videos_by_category(category):
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_conn()
         cur = conn.cursor()
-        cur.execute('SELECT video_id, user_id FROM videos WHERE category = ? ORDER BY timestamp DESC', (category,))
+        cur.execute('SELECT video_id, user_id FROM videos WHERE category = %s ORDER BY timestamp DESC', (category,))
         videos = cur.fetchall()
+        cur.close()
         return videos
     except Exception as e:
         logger.error(f"Error in get_videos_by_category: {e}")
         return []
     finally:
-        conn.close()
+        if conn:
+            put_conn(conn)
 
 
 def get_user_videos(user_id):
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_conn()
         cur = conn.cursor()
-        cur.execute('SELECT video_id, category FROM videos WHERE user_id = ? ORDER BY timestamp DESC', (user_id,))
+        cur.execute('SELECT video_id, category FROM videos WHERE user_id = %s ORDER BY timestamp DESC', (user_id,))
         videos = cur.fetchall()
+        cur.close()
         return videos
     except Exception as e:
         logger.error(f"Error in get_user_videos: {e}")
         return []
     finally:
-        conn.close()
+        if conn:
+            put_conn(conn)
 
 
 def get_user_videos_by_category(user_id, category):
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_conn()
         cur = conn.cursor()
-        cur.execute('SELECT video_id, category FROM videos WHERE user_id = ? AND category = ? ORDER BY timestamp DESC',
-                    (user_id, category))
+        cur.execute(
+            'SELECT video_id, category FROM videos WHERE user_id = %s AND category = %s ORDER BY timestamp DESC',
+            (user_id, category))
         videos = cur.fetchall()
+        cur.close()
         return videos
     except Exception as e:
         logger.error(f"Error in get_user_videos_by_category: {e}")
         return []
     finally:
-        conn.close()
+        if conn:
+            put_conn(conn)
 
 
 def get_video_info(video_id):
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_conn()
         cur = conn.cursor()
-        cur.execute('SELECT user_id, category FROM videos WHERE video_id = ?', (video_id,))
+        cur.execute('SELECT user_id, category FROM videos WHERE video_id = %s', (video_id,))
         video = cur.fetchone()
+        cur.close()
         return video
     except Exception as e:
         logger.error(f"Error in get_video_info: {e}")
         return None
     finally:
-        conn.close()
+        if conn:
+            put_conn(conn)
+
+
+# ---------- Referral helpers ----------
+BOT_USERNAME = None
+
+
+def init_bot_username():
+    global BOT_USERNAME
+    try:
+        me = bot.get_me()
+        BOT_USERNAME = getattr(me, "username", None)
+        if BOT_USERNAME:
+            logger.info(f"Bot username: {BOT_USERNAME}")
+        else:
+            logger.warning("Couldn't fetch bot username.")
+    except Exception as e:
+        logger.warning(f"Failed to get bot username: {e}")
+        BOT_USERNAME = None
+
+
+def get_referral_link(user_id):
+    # return deep link like https://t.me/<bot_username>?start=ref<user_id>
+    if BOT_USERNAME:
+        return f"https://t.me/{BOT_USERNAME}?start=ref{user_id}"
+    else:
+        # fallback to t.me link without username (less ideal)
+        return f"https://t.me/your_bot_username_here?start=ref{user_id}"
+
+
+def add_referral(referrer_id, referee_id):
+    """
+    ثبت ارجاع: فقط اگر referrer != referee و اگر قبلاً ثبت نشده باشد.
+    بازگشت: True اگر جدید اضافه شد، False اگر قبلاً وجود داشت یا نامعتبر بود.
+    """
+    if not referrer_id or not referee_id or referrer_id == referee_id:
+        return False
+
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # بررسی اینکه قبلاً ثبت نشده باشد
+        cur.execute('SELECT 1 FROM referrals WHERE referrer_id = %s AND referee_id = %s', (referrer_id, referee_id))
+        if cur.fetchone():
+            cur.close()
+            return False
+        cur.execute('INSERT INTO referrals (referrer_id, referee_id) VALUES (%s, %s)', (referrer_id, referee_id))
+        conn.commit()
+        cur.close()
+        logger.info(f"Referral recorded: {referrer_id} -> {referee_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error adding referral: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return False
+    finally:
+        if conn:
+            put_conn(conn)
+
+
+def get_referral_count(referrer_id):
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id = %s', (referrer_id,))
+        r = cur.fetchone()
+        cur.close()
+        return r[0] if r else 0
+    except Exception as e:
+        logger.error(f"Error getting referral count: {e}")
+        return 0
+    finally:
+        if conn:
+            put_conn(conn)
 
 
 # ---------- Helper function to delete messages ----------
@@ -906,9 +974,15 @@ def handle_all_messages(message):
             bot.reply_to(message, "❌ لطفاً یکی از دسته‌بندی‌های موجود را انتخاب کنید:")
             show_my_videos(message)
 
+    @bot.message_handler(commands=['admin_control_for_manage_videos_and_more_text_for_Prevention_Access_normal_user'])
+    def admin(message):
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add('📤 ارسال ویدیو', '🔄 تغییر دسته‌بندی')
+        bot.send_message(message.chat.id, "به ربات مدیریت ویدیو خوش آمدید!", reply_markup=markup)
+
 
 # ----------------- بوت راه‌اندازی -----------------
-init_db()
+create_table()
 
 
 # ---------- Flask / ping endpoint ----------
@@ -953,23 +1027,33 @@ def self_ping_loop():
 
 
 # --- helper wrapper for protected video sending ---
-# def send_protected_video(chat_id, video_id, caption=None, **kwargs):
-#     """
-#     Send video with protect_content=True when possible.
-#     If telebot version doesn't accept the parameter, try fallback to plain send_video.
-#     Returns the sent message object or raises the underlying exception.
-#     """
-#     try:
-#         # use bot.send_video (not recursive)
-#         return bot.send_video(chat_id, video_id, caption=caption, protect_content=True, **kwargs)
-#     except TypeError as e:
-#         # telebot older version -> doesn't accept protect_content
-#         logger.warning(f"bot.send_video doesn't accept protect_content param: {e}. Falling back to plain send_video.")
-#         return bot.send_video(chat_id, video_id, caption=caption, **kwargs)
-#     except Exception as e:
-#         # سایر خطاها را لاگ کن و دوباره پرت کن یا None برگردون (انتخاب شما)
-#         logger.error(f"Error sending protected video: {e}")
-#         raise
+def send_protected_video(chat_id, video_id, caption=None, **kwargs):
+    """
+    ارسال ویدیو با قابلیت فروارد و اینلاین کیبورد
+    """
+    try:
+        # استفاده از protect_content=False برای اجازه فروارد
+        return bot.send_video(
+            chat_id,
+            video_id,
+            caption=caption,
+            protect_content=False,  # تغییر به False برای اجازه فروارد
+            reply_markup=create_video_keyboard(),  # اضافه کردن اینلاین کیبورد
+            **kwargs
+        )
+    except TypeError as e:
+        # اگر protect_content پشتیبانی نمی‌شود
+        logger.warning(f"bot.send_video doesn't accept protect_content param: {e}. Falling back to plain send_video.")
+        return bot.send_video(
+            chat_id,
+            video_id,
+            caption=caption,
+            reply_markup=create_video_keyboard(),  # اضافه کردن اینلاین کیبورد
+            **kwargs
+        )
+    except Exception as e:
+        logger.error(f"Error sending video: {e}")
+        raise
 
 
 # ----------------- main -----------------
