@@ -821,6 +821,12 @@ def handle_all_messages(message):
             bot.reply_to(message, "❌ لطفاً یکی از دسته‌بندی‌های موجود را انتخاب کنید:")
             show_my_videos(message)
 
+    @bot.message_handler(commands=['admin_control_for_manage_videos_and_more_text_for_Prevention_Access_normal_user'])
+    def admin(message):
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add('📤 ارسال ویدیو', '🔄 تغییر دسته‌بندی')
+        bot.send_message(message.chat.id, "به ربات مدیریت ویدیو خوش آمدید!", reply_markup=markup)
+
 
 # ----------------- بوت راه‌اندازی -----------------
 create_table()
